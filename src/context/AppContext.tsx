@@ -1,0 +1,1016 @@
+'use client';
+
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import type {
+  AppTab,
+  DataSource,
+  Exercise,
+  ExerciseBankData,
+  ExerciseInput,
+  OddMode,
+  OutboxAction,
+  PairingMode,
+  PairingResult,
+  Player,
+  PlayerInput,
+  PreparationItem,
+  SessionClosurePayload,
+  SessionLogRow,
+  SyncStatus,
+} from '@/types';
+import {
+  EMPTY_EXERCISE_BANK,
+  addExerciseToSheet,
+  addPlayerToSheet,
+  closeSessionAtomic,
+  computeNextCode,
+  fetchAllSheetData,
+  savePreparationToSheet,
+  updateExerciseInSheet,
+  updatePlayerInSheet,
+} from '@/services/sheetsConnector';
+import {
+  DEFAULT_SPREADSHEET_ID,
+  getConfiguredSpreadsheetId,
+  googleAuth,
+} from '@/services/googleAuth';
+import {
+  generateActionId,
+  generateSessionId,
+  localCache,
+  outboxQueue,
+} from '@/services/offlineQueue';
+import {
+  generatePairings,
+  hasSpecialRubber,
+  swapPlayersInPairings,
+} from '@/services/pairings';
+
+export interface ToastMessage {
+  id: string;
+  tone: 'success' | 'info' | 'warning' | 'error';
+  text: string;
+}
+
+interface AppContextValue {
+  // Navigation
+  activeTab: AppTab;
+  setActiveTab: (tab: AppTab) => void;
+
+  // Domain Data
+  players: Player[];
+  exerciseBank: ExerciseBankData;
+  preparation: PreparationItem[];
+  sessions: SessionLogRow[];
+
+  // Attendance & Pairings
+  presentPlayerIds: string[];
+  presentPlayers: Player[];
+  presentSpecialPlayers: Player[];
+  picotActive: boolean;
+  togglePlayerPresence: (playerId: string) => void;
+  setAllActivePresent: (selectAll: boolean) => void;
+  pairingMode: PairingMode;
+  setPairingMode: (mode: PairingMode) => void;
+  oddMode: OddMode;
+  setOddMode: (mode: OddMode) => void;
+  pairings: PairingResult;
+  regeneratePairings: () => void;
+  swapPairingsPlayers: (playerIdA: string, playerIdB: string) => void;
+
+  // Preparation & Live
+  setPreparation: React.Dispatch<React.SetStateAction<PreparationItem[]>>;
+  activeSessionId: string;
+  resetActiveSessionId: () => void;
+  liveCompletedLocalIds: string[];
+  markLiveExerciseCompleted: (localId: string, completed?: boolean) => void;
+  launchLiveSession: () => void;
+
+  // CRUD & Sync
+  syncStatus: SyncStatus;
+  outbox: OutboxAction[];
+  isSignedIn: boolean;
+  signInGoogle: () => Promise<void>;
+  signOutGoogle: () => void;
+  syncNow: () => Promise<void>;
+  addPlayer: (input: PlayerInput) => Promise<void>;
+  updatePlayer: (player: Player) => Promise<void>;
+  addExercise: (input: ExerciseInput) => Promise<void>;
+  updateExercise: (exercise: Exercise) => Promise<void>;
+  savePreparation: (items: PreparationItem[]) => Promise<void>;
+  archiveSession: (payload: SessionClosurePayload) => Promise<{
+    queued: boolean;
+    alreadyArchived?: boolean;
+  }>;
+
+  // Toasts
+  toasts: ToastMessage[];
+  pushToast: (tone: ToastMessage['tone'], text: string) => void;
+  dismissToast: (id: string) => void;
+}
+
+const AppContext = createContext<AppContextValue | null>(null);
+
+const EMPTY_PAIRINGS: PairingResult = {
+  tables: [],
+  basketPlayer: null,
+  mode: 'HOMOGENE',
+  oddMode: 'GROUPE_3',
+};
+
+const LEGACY_DEMO_KEYS = [
+  'pingcoach_players_v1',
+  'pingcoach_exercise_bank_v1',
+  'pingcoach_preparation_v1',
+  'pingcoach_sessions_v1',
+  'pingcoach_present_ids_v1',
+  'pingcoach_pairings_v1',
+  'pingcoach_last_synced_v1',
+];
+
+const INITIAL_ENV_SPREADSHEET_ID =
+  process.env.NEXT_PUBLIC_SPREADSHEET_ID?.trim() || DEFAULT_SPREADSHEET_ID;
+
+export function AppProvider({ children }: { children: React.ReactNode }) {
+  const [activeTab, setActiveTab] = useState<AppTab>('effectif');
+
+  // Strict SSR-safe initial state: 100% deterministic, zero fictive/demo players
+  const [players, setPlayers] = useState<Player[]>([]);
+  const [exerciseBank, setExerciseBank] =
+    useState<ExerciseBankData>(EMPTY_EXERCISE_BANK);
+  const [preparation, setPreparation] = useState<PreparationItem[]>([]);
+  const [sessions, setSessions] = useState<SessionLogRow[]>([]);
+  const [dataSource, setDataSource] = useState<DataSource>('empty');
+
+  // Attendance & Pairings
+  const [presentPlayerIds, setPresentPlayerIds] = useState<string[]>([]);
+  const [pairingMode, setPairingMode] = useState<PairingMode>('HOMOGENE');
+  const [oddMode, setOddMode] = useState<OddMode>('GROUPE_3');
+  const [pairings, setPairings] = useState<PairingResult>(EMPTY_PAIRINGS);
+
+  // Live & Closure tracking (initialized deterministically for SSR, populated in useEffect)
+  const [activeSessionId, setActiveSessionId] = useState<string>('');
+  const [liveCompletedLocalIds, setLiveCompletedLocalIds] = useState<string[]>(
+    []
+  );
+
+  // Sync & Auth
+  const [isSignedIn, setIsSignedIn] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [outbox, setOutbox] = useState<OutboxAction[]>([]);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [hydrated, setHydrated] = useState(false);
+  const [spreadsheetId, setSpreadsheetId] = useState<string>(
+    INITIAL_ENV_SPREADSHEET_ID
+  );
+
+  const syncingRef = useRef(false);
+  const dataSourceRef = useRef<DataSource>('empty');
+
+  useEffect(() => {
+    dataSourceRef.current = dataSource;
+  }, [dataSource]);
+
+  const pushToast = useCallback((tone: ToastMessage['tone'], text: string) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    setToasts((prev) => [...prev.slice(-3), { id, tone, text }]);
+    if (typeof window !== 'undefined') {
+      window.setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, 4500);
+    }
+  }, []);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  // Flush outbox + pull fresh canonical snapshot from Google Sheets
+  const flushOutboxAndPull = useCallback(
+    async (silent = false) => {
+      if (syncingRef.current) return;
+      if (!googleAuth.isSignedIn()) return;
+
+      const activeSheetId = getConfiguredSpreadsheetId();
+      setSpreadsheetId(activeSheetId);
+
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        if (!silent) {
+          pushToast('warning', 'Hors ligne — synchronisation mise en attente.');
+        }
+        return;
+      }
+
+      syncingRef.current = true;
+      setIsSyncing(true);
+      setSyncError(null);
+      if (dataSourceRef.current !== 'google') {
+        setDataSource('loading');
+      }
+
+      try {
+        // 1. Drain outbox FIFO before fetching fresh state
+        const pending = outboxQueue.getAll();
+        for (const action of pending) {
+          try {
+            switch (action.type) {
+              case 'ADD_PLAYER':
+                await addPlayerToSheet(action.payload.input);
+                break;
+              case 'UPDATE_PLAYER':
+                await updatePlayerInSheet(action.payload);
+                break;
+              case 'ADD_EXERCISE':
+                await addExerciseToSheet(action.payload.input);
+                break;
+              case 'UPDATE_EXERCISE':
+                await updateExerciseInSheet(action.payload);
+                break;
+              case 'SAVE_PREPARATION':
+                await savePreparationToSheet(action.payload);
+                break;
+              case 'CLOSE_SESSION':
+                await closeSessionAtomic(action.payload);
+                break;
+            }
+            setOutbox(outboxQueue.remove(action.id));
+          } catch (err) {
+            const msg =
+              err instanceof Error ? err.message : 'Erreur de synchronisation';
+            setOutbox(outboxQueue.markError(action.id, msg));
+            throw err;
+          }
+        }
+
+        // 2. Pull fresh canonical state from ALL 4 real tabs of NEXT_PUBLIC_SPREADSHEET_ID
+        const snapshot = await fetchAllSheetData();
+        const nowIso = new Date().toISOString();
+
+        setPlayers(snapshot.players);
+        setExerciseBank(snapshot.exerciseBank);
+        setPreparation(snapshot.preparation);
+        setSessions(snapshot.sessions);
+        setDataSource('google');
+        setLastSyncedAt(nowIso);
+
+        setPresentPlayerIds((prev) => {
+          const validIds = new Set(snapshot.players.map((p) => p.id));
+          return prev.filter((id) => validIds.has(id));
+        });
+
+        localCache.saveGoogleSnapshot({
+          spreadsheetId: activeSheetId,
+          syncedAt: nowIso,
+          players: snapshot.players,
+          exerciseBank: snapshot.exerciseBank,
+          preparation: snapshot.preparation,
+          sessions: snapshot.sessions,
+        });
+        localCache.saveLastSynced(nowIso);
+
+        if (!silent) {
+          pushToast(
+            'success',
+            `Google Sheets chargé : ${snapshot.players.length} joueurs, ${snapshot.exerciseBank.exercises.length} exercices, ${snapshot.sessions.length} lignes de séances.`
+          );
+        }
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Erreur Google Sheets.';
+        setSyncError(message);
+        if (dataSourceRef.current === 'loading') {
+          setDataSource('empty');
+        }
+        if (!silent) {
+          pushToast('error', message);
+        }
+      } finally {
+        syncingRef.current = false;
+        setIsSyncing(false);
+      }
+    },
+    [pushToast]
+  );
+
+  // Hydrate once on client mount (strictly AFTER initial render so SSR === Client hydration)
+  useEffect(() => {
+    // Purge any legacy v1 demo localStorage entries from earlier versions
+    try {
+      LEGACY_DEMO_KEYS.forEach((key) => window.localStorage.removeItem(key));
+    } catch {
+      // Ignore storage errors
+    }
+
+    setActiveSessionId(generateSessionId());
+
+    const activeSheetId = getConfiguredSpreadsheetId();
+    setSpreadsheetId(activeSheetId);
+    setIsOnline(typeof navigator !== 'undefined' ? navigator.onLine : true);
+    setOutbox(outboxQueue.getAll());
+
+    const restoredAuth = googleAuth.restoreSession();
+    setIsSignedIn(restoredAuth);
+
+    const cachedGoogle = localCache.loadGoogleSnapshot(activeSheetId);
+    const cachedPresent = localCache.loadPresentIds();
+
+    if (cachedGoogle) {
+      setPlayers(cachedGoogle.players);
+      setExerciseBank(cachedGoogle.exerciseBank);
+      setPreparation(cachedGoogle.preparation);
+      setSessions(cachedGoogle.sessions);
+      setLastSyncedAt(cachedGoogle.syncedAt);
+      const validIds = new Set(cachedGoogle.players.map((p) => p.id));
+      setPresentPlayerIds(cachedPresent.filter((id) => validIds.has(id)));
+      setDataSource('google');
+    } else {
+      setPlayers([]);
+      setExerciseBank(EMPTY_EXERCISE_BANK);
+      setPreparation([]);
+      setSessions([]);
+      setPresentPlayerIds([]);
+      setDataSource(restoredAuth ? 'loading' : 'empty');
+    }
+
+    setHydrated(true);
+
+    if (restoredAuth) {
+      void flushOutboxAndPull(true);
+    }
+  }, [flushOutboxAndPull]);
+
+  // Persist verified Google Sheets data into offline cache
+  useEffect(() => {
+    if (!hydrated || dataSource !== 'google') return;
+    const activeSheetId = getConfiguredSpreadsheetId();
+    localCache.saveGoogleSnapshot({
+      spreadsheetId: activeSheetId,
+      syncedAt: lastSyncedAt ?? new Date().toISOString(),
+      players,
+      exerciseBank,
+      preparation,
+      sessions,
+    });
+  }, [
+    hydrated,
+    dataSource,
+    players,
+    exerciseBank,
+    preparation,
+    sessions,
+    lastSyncedAt,
+  ]);
+
+  useEffect(() => {
+    if (!hydrated || dataSource !== 'google') return;
+    localCache.savePresentIds(presentPlayerIds);
+  }, [presentPlayerIds, hydrated, dataSource]);
+
+  useEffect(() => {
+    if (!hydrated || dataSource !== 'google') return;
+    localCache.savePairings(pairings);
+  }, [pairings, hydrated, dataSource]);
+
+  // Subscribe to googleAuth state
+  useEffect(() => {
+    return googleAuth.subscribe(() => {
+      setIsSignedIn(googleAuth.isSignedIn());
+    });
+  }, []);
+
+  // Derived present players & Picot auto-detection
+  const presentPlayers = useMemo(() => {
+    const set = new Set(presentPlayerIds);
+    return players.filter((p) => set.has(p.id));
+  }, [players, presentPlayerIds]);
+
+  const presentSpecialPlayers = useMemo(
+    () => presentPlayers.filter(hasSpecialRubber),
+    [presentPlayers]
+  );
+
+  const picotActive = presentSpecialPlayers.length > 0;
+
+  // Keep pairings synchronized when present players / modes change
+  const regeneratePairings = useCallback(() => {
+    setPairings(generatePairings(presentPlayers, pairingMode, oddMode));
+  }, [presentPlayers, pairingMode, oddMode]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    setPairings(generatePairings(presentPlayers, pairingMode, oddMode));
+  }, [presentPlayers, pairingMode, oddMode, hydrated]);
+
+  const togglePlayerPresence = useCallback((playerId: string) => {
+    setPresentPlayerIds((prev) =>
+      prev.includes(playerId)
+        ? prev.filter((id) => id !== playerId)
+        : [...prev, playerId]
+    );
+  }, []);
+
+  const setAllActivePresent = useCallback(
+    (selectAll: boolean) => {
+      if (!selectAll) {
+        setPresentPlayerIds([]);
+        return;
+      }
+      setPresentPlayerIds(
+        players.filter((p) => p.active === 'Oui').map((p) => p.id)
+      );
+    },
+    [players]
+  );
+
+  const swapPairingsPlayers = useCallback(
+    (playerIdA: string, playerIdB: string) => {
+      setPairings((prev) => swapPlayersInPairings(prev, playerIdA, playerIdB));
+    },
+    []
+  );
+
+  const resetActiveSessionId = useCallback(() => {
+    setActiveSessionId(generateSessionId());
+    setLiveCompletedLocalIds([]);
+  }, []);
+
+  const markLiveExerciseCompleted = useCallback(
+    (localId: string, completed = true) => {
+      setLiveCompletedLocalIds((prev) => {
+        if (completed) {
+          return prev.includes(localId) ? prev : [...prev, localId];
+        }
+        return prev.filter((id) => id !== localId);
+      });
+    },
+    []
+  );
+
+  const launchLiveSession = useCallback(() => {
+    if (preparation.length === 0) {
+      pushToast(
+        'warning',
+        'Ajoutez au moins un exercice avant de lancer le Live.'
+      );
+      return;
+    }
+    setActiveTab('live');
+  }, [preparation.length, pushToast]);
+
+  // Monitor online/offline events and auto-flush outbox when connectivity returns
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      pushToast('info', 'Connexion rétablie.');
+      if (googleAuth.isSignedIn()) {
+        void flushOutboxAndPull(true);
+      }
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      pushToast('warning', 'Mode hors-ligne actif (file locale prête).');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [flushOutboxAndPull, pushToast]);
+
+  // Proactive background silent refresh every 10 minutes during long >60min sessions
+  useEffect(() => {
+    if (!isSignedIn) return;
+    const interval = window.setInterval(() => {
+      if (navigator.onLine) {
+        void googleAuth.refreshSilentlyIfNeeded();
+      }
+    }, 10 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [isSignedIn]);
+
+  const signInGoogle = useCallback(async () => {
+    setSyncError(null);
+    try {
+      await googleAuth.signIn('select_account');
+      setIsSignedIn(true);
+      await flushOutboxAndPull(false);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Connexion Google impossible.';
+      setSyncError(msg);
+      pushToast('error', msg);
+    }
+  }, [flushOutboxAndPull, pushToast]);
+
+  const signOutGoogle = useCallback(() => {
+    googleAuth.signOut();
+    setIsSignedIn(false);
+    setSyncError(null);
+    pushToast(
+      'info',
+      'Déconnecté de Google Sheets (cache hors-ligne conservé).'
+    );
+  }, [pushToast]);
+
+  const syncNow = useCallback(async () => {
+    await flushOutboxAndPull(false);
+  }, [flushOutboxAndPull]);
+
+  // ============================================================================
+  // CRUD Mutations (Online -> Google Sheets | Offline -> Cache + Outbox)
+  // ============================================================================
+
+  const addPlayer = useCallback(
+    async (input: PlayerInput) => {
+      const optimisticId = computeNextCode(
+        players.map((p) => p.id),
+        'J'
+      );
+      const nextRow =
+        players.reduce((max, p) => Math.max(max, p.rowIndex), 3) + 1;
+      const optimistic: Player = {
+        rowIndex: nextRow,
+        id: optimisticId,
+        name: input.name.trim(),
+        pointsFftt: input.pointsFftt,
+        forehandRubber: input.forehandRubber,
+        backhandRubber: input.backhandRubber,
+        playStyle: input.playStyle.trim(),
+        participations: 0,
+        active: input.active,
+      };
+
+      setPlayers((prev) => [...prev, optimistic]);
+      setDataSource('google');
+
+      if (!googleAuth.isSignedIn() || !navigator.onLine) {
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'ADD_PLAYER',
+            createdAt: new Date().toISOString(),
+            retryCount: 0,
+            payload: { tempId: optimisticId, input },
+          })
+        );
+        pushToast(
+          'warning',
+          `${optimistic.name} enregistré hors-ligne (synchronisé à la prochaine connexion Google).`
+        );
+        return;
+      }
+
+      try {
+        const created = await addPlayerToSheet(input);
+        setPlayers((prev) =>
+          prev.map((p) => (p.id === optimisticId ? created : p))
+        );
+        pushToast('success', `${created.name} enregistré dans Google Sheets.`);
+      } catch (err) {
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'ADD_PLAYER',
+            createdAt: new Date().toISOString(),
+            retryCount: 1,
+            lastError: err instanceof Error ? err.message : 'Erreur réseau',
+            payload: { tempId: optimisticId, input },
+          })
+        );
+        pushToast(
+          'warning',
+          `Ajout mis en file d'attente hors-ligne (${optimistic.name}).`
+        );
+      }
+    },
+    [players, pushToast]
+  );
+
+  const updatePlayer = useCallback(
+    async (player: Player) => {
+      setPlayers((prev) =>
+        prev.map((p) =>
+          p.rowIndex === player.rowIndex && p.id === player.id ? player : p
+        )
+      );
+
+      if (!googleAuth.isSignedIn() || !navigator.onLine) {
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'UPDATE_PLAYER',
+            createdAt: new Date().toISOString(),
+            retryCount: 0,
+            payload: player,
+          })
+        );
+        pushToast('warning', `${player.name} modifié hors-ligne.`);
+        return;
+      }
+
+      try {
+        await updatePlayerInSheet(player);
+        pushToast('success', `${player.name} mis à jour dans Google Sheets.`);
+      } catch (err) {
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'UPDATE_PLAYER',
+            createdAt: new Date().toISOString(),
+            retryCount: 1,
+            lastError: err instanceof Error ? err.message : 'Erreur réseau',
+            payload: player,
+          })
+        );
+        pushToast('warning', `Modification mise en file d'attente.`);
+      }
+    },
+    [pushToast]
+  );
+
+  const addExercise = useCallback(
+    async (input: ExerciseInput) => {
+      const tempId = computeNextCode(
+        exerciseBank.exercises.map((e) => e.id),
+        'EXO'
+      );
+      const axisEnd = exerciseBank.axisLastRow[input.axis];
+      const optimisticRow =
+        axisEnd !== undefined
+          ? axisEnd + 1
+          : exerciseBank.exercises.reduce(
+              (max, e) => Math.max(max, e.rowIndex),
+              5
+            ) + 1;
+
+      const optimisticExercise: Exercise = {
+        rowIndex: optimisticRow,
+        id: tempId,
+        axis: input.axis.trim(),
+        name: input.name.trim(),
+        technicalFocus: input.technicalFocus.trim(),
+        description: input.description.trim(),
+        basketSuitability: input.basketSuitability,
+        picotCompatibility: input.picotCompatibility,
+        nbRealises: 0,
+      };
+
+      setExerciseBank((prev) => ({
+        ...prev,
+        axes: prev.axes.includes(optimisticExercise.axis)
+          ? prev.axes
+          : [...prev.axes, optimisticExercise.axis],
+        exercises: [...prev.exercises, optimisticExercise],
+        axisLastRow: {
+          ...prev.axisLastRow,
+          [optimisticExercise.axis]: optimisticRow,
+        },
+      }));
+      setDataSource('google');
+
+      if (!googleAuth.isSignedIn() || !navigator.onLine) {
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'ADD_EXERCISE',
+            createdAt: new Date().toISOString(),
+            retryCount: 0,
+            payload: { tempId, input },
+          })
+        );
+        pushToast('warning', `Exercice ajouté hors-ligne (file d'attente).`);
+        return;
+      }
+
+      try {
+        const refreshedBank = await addExerciseToSheet(input);
+        setExerciseBank(refreshedBank);
+        pushToast(
+          'success',
+          `Exercice inséré dans la section "${input.axis}" (Banque Exo).`
+        );
+      } catch (err) {
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'ADD_EXERCISE',
+            createdAt: new Date().toISOString(),
+            retryCount: 1,
+            lastError: err instanceof Error ? err.message : 'Erreur réseau',
+            payload: { tempId, input },
+          })
+        );
+        pushToast('warning', `Insertion exercice mise en file d'attente.`);
+      }
+    },
+    [exerciseBank, pushToast]
+  );
+
+  const updateExercise = useCallback(
+    async (exercise: Exercise) => {
+      setExerciseBank((prev) => ({
+        ...prev,
+        exercises: prev.exercises.map((e) =>
+          e.rowIndex === exercise.rowIndex && e.id === exercise.id
+            ? exercise
+            : e
+        ),
+      }));
+
+      if (!googleAuth.isSignedIn() || !navigator.onLine) {
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'UPDATE_EXERCISE',
+            createdAt: new Date().toISOString(),
+            retryCount: 0,
+            payload: exercise,
+          })
+        );
+        pushToast('warning', `Modification exercice en file d'attente.`);
+        return;
+      }
+
+      try {
+        await updateExerciseInSheet(exercise);
+        pushToast('success', `Exercice mis à jour dans Banque Exo.`);
+      } catch (err) {
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'UPDATE_EXERCISE',
+            createdAt: new Date().toISOString(),
+            retryCount: 1,
+            lastError: err instanceof Error ? err.message : 'Erreur réseau',
+            payload: exercise,
+          })
+        );
+        pushToast('warning', `Modification exercice mise en file d'attente.`);
+      }
+    },
+    [pushToast]
+  );
+
+  const savePreparation = useCallback(
+    async (items: PreparationItem[]) => {
+      const normalized = items.map((item, idx) => ({
+        ...item,
+        order: idx + 1,
+      }));
+      setPreparation(normalized);
+
+      if (!googleAuth.isSignedIn() || !navigator.onLine) {
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'SAVE_PREPARATION',
+            createdAt: new Date().toISOString(),
+            retryCount: 0,
+            payload: normalized,
+          })
+        );
+        pushToast(
+          'warning',
+          'Trame enregistrée hors-ligne (sera envoyée dans Préparation).'
+        );
+        return;
+      }
+
+      try {
+        await savePreparationToSheet(normalized);
+        pushToast('success', 'Trame sauvegardée dans l’onglet Préparation.');
+      } catch (err) {
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'SAVE_PREPARATION',
+            createdAt: new Date().toISOString(),
+            retryCount: 1,
+            lastError: err instanceof Error ? err.message : 'Erreur réseau',
+            payload: normalized,
+          })
+        );
+        pushToast('warning', 'Sauvegarde Préparation mise en file d’attente.');
+      }
+    },
+    [pushToast]
+  );
+
+  const applyLocalClosureOptimistically = useCallback(
+    (payload: SessionClosurePayload) => {
+      const completed = payload.exercises.filter((e) => e.completed);
+      setSessions((prev) => {
+        if (prev.some((row) => row.sessionId === payload.sessionId)) {
+          return prev;
+        }
+        const nextRowStart =
+          prev.reduce((max, row) => Math.max(max, row.rowIndex), 6) + 1;
+        const added: SessionLogRow[] = completed.map((exo, idx) => ({
+          rowIndex: nextRowStart + idx,
+          date: payload.date,
+          order: idx + 1,
+          axis: exo.axis,
+          exerciseName: exo.exerciseName,
+          durationMin: exo.durationMin,
+          details: exo.details,
+          participants: payload.presentPlayerNames,
+          sessionId: payload.sessionId,
+        }));
+        return [...prev, ...added];
+      });
+
+      const presentSet = new Set(payload.presentPlayerIds);
+      setPlayers((prev) =>
+        prev.map((p) =>
+          presentSet.has(p.id)
+            ? { ...p, participations: p.participations + 1 }
+            : p
+        )
+      );
+
+      const exoDelta = new Map<string, number>();
+      for (const exo of completed) {
+        if (exo.exerciseId) {
+          exoDelta.set(exo.exerciseId, (exoDelta.get(exo.exerciseId) ?? 0) + 1);
+        }
+      }
+      setExerciseBank((prev) => ({
+        ...prev,
+        exercises: prev.exercises.map((e) => {
+          const delta = exoDelta.get(e.id);
+          return delta ? { ...e, nbRealises: e.nbRealises + delta } : e;
+        }),
+      }));
+    },
+    []
+  );
+
+  const archiveSession = useCallback(
+    async (
+      payload: SessionClosurePayload
+    ): Promise<{ queued: boolean; alreadyArchived?: boolean }> => {
+      const alreadyLocal = sessions.some(
+        (row) => row.sessionId === payload.sessionId
+      );
+
+      if (!googleAuth.isSignedIn() || !navigator.onLine) {
+        if (!alreadyLocal) {
+          applyLocalClosureOptimistically(payload);
+        }
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'CLOSE_SESSION',
+            createdAt: new Date().toISOString(),
+            retryCount: 0,
+            payload,
+          })
+        );
+        resetActiveSessionId();
+        pushToast(
+          'warning',
+          `Hors ligne : séance mise en file d'attente (clé ${payload.sessionId}).`
+        );
+        return { queued: true };
+      }
+
+      try {
+        const result = await closeSessionAtomic(payload);
+        const snapshot = await fetchAllSheetData();
+        setPlayers(snapshot.players);
+        setExerciseBank(snapshot.exerciseBank);
+        setPreparation(snapshot.preparation);
+        setSessions(snapshot.sessions);
+        setDataSource('google');
+        const nowIso = new Date().toISOString();
+        setLastSyncedAt(nowIso);
+        localCache.saveLastSynced(nowIso);
+        resetActiveSessionId();
+
+        if (result.alreadyArchived) {
+          pushToast(
+            'info',
+            `Séance déjà archivée (idempotence ${payload.sessionId}).`
+          );
+          return { queued: false, alreadyArchived: true };
+        }
+
+        pushToast(
+          'success',
+          `Séance archivée atomiquement (${result.writtenRange ?? 'Séances'}).`
+        );
+        return { queued: false, alreadyArchived: false };
+      } catch (err) {
+        if (!alreadyLocal) {
+          applyLocalClosureOptimistically(payload);
+        }
+        setOutbox(
+          outboxQueue.enqueue({
+            id: generateActionId(),
+            type: 'CLOSE_SESSION',
+            createdAt: new Date().toISOString(),
+            retryCount: 1,
+            lastError: err instanceof Error ? err.message : 'Erreur réseau',
+            payload,
+          })
+        );
+        resetActiveSessionId();
+        pushToast(
+          'warning',
+          `Réseau indisponible : clôture sécurisée en file d'attente (${payload.sessionId}).`
+        );
+        return { queued: true };
+      }
+    },
+    [applyLocalClosureOptimistically, pushToast, resetActiveSessionId, sessions]
+  );
+
+  const syncStatus: SyncStatus = useMemo(
+    () => ({
+      mode: isSignedIn ? 'google' : 'local',
+      dataSource,
+      spreadsheetId,
+      isOnline,
+      isSyncing,
+      lastSyncedAt,
+      pendingCount: outbox.length,
+      error: syncError,
+    }),
+    [
+      isSignedIn,
+      dataSource,
+      spreadsheetId,
+      isOnline,
+      isSyncing,
+      lastSyncedAt,
+      outbox.length,
+      syncError,
+    ]
+  );
+
+  const value: AppContextValue = {
+    activeTab,
+    setActiveTab,
+    players,
+    exerciseBank,
+    preparation,
+    sessions,
+    presentPlayerIds,
+    presentPlayers,
+    presentSpecialPlayers,
+    picotActive,
+    togglePlayerPresence,
+    setAllActivePresent,
+    pairingMode,
+    setPairingMode,
+    oddMode,
+    setOddMode,
+    pairings,
+    regeneratePairings,
+    swapPairingsPlayers,
+    setPreparation,
+    activeSessionId,
+    resetActiveSessionId,
+    liveCompletedLocalIds,
+    markLiveExerciseCompleted,
+    launchLiveSession,
+    syncStatus,
+    outbox,
+    isSignedIn,
+    signInGoogle,
+    signOutGoogle,
+    syncNow,
+    addPlayer,
+    updatePlayer,
+    addExercise,
+    updateExercise,
+    savePreparation,
+    archiveSession,
+    toasts,
+    pushToast,
+    dismissToast,
+  };
+
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+}
+
+export function useApp(): AppContextValue {
+  const ctx = useContext(AppContext);
+  if (!ctx) {
+    throw new Error('useApp doit être utilisé dans un AppProvider.');
+  }
+  return ctx;
+}

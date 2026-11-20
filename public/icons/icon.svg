@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#09090b"/>
+  <rect x="24" y="24" width="464" height="464" rx="92" fill="none" stroke="#f59e0b" stroke-opacity="0.28" stroke-width="8"/>
+  <!-- Handle -->
+  <path d="M294 318 L398 422 C412 436 434 436 448 422 C462 408 462 386 448 372 L344 268 Z" fill="#d97706"/>
+  <path d="M312 300 L416 404" stroke="#92400e" stroke-width="10" stroke-linecap="round"/>
+  <!-- Paddle Head -->
+  <circle cx="228" cy="218" r="136" fill="#ef4444"/>
+  <circle cx="228" cy="218" r="122" fill="#dc2626"/>
+  <path d="M138 308 L318 128" stroke="#fca5a5" stroke-opacity="0.22" stroke-width="26" stroke-linecap="round"/>
+  <!-- Table Tennis Ball -->
+  <circle cx="384" cy="144" r="46" fill="#fef3c7"/>
+  <circle cx="370" cy="130" r="14" fill="#ffffff" opacity="0.7"/>
+  <!-- Subtle speed arc -->
+  <path d="M310 100 Q345 78 386 86" fill="none" stroke="#f59e0b" stroke-width="10" stroke-linecap="round"/>
+</svg>
