@@ -2,7 +2,8 @@
 
 const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 const TOKEN_REFRESH_BUFFER_MS = 2 * 60 * 1000; // Refresh proactively 2 min before 60-min expiry
-const SILENT_REFRESH_TIMEOUT_MS = 10_000;
+const SILENT_REFRESH_TIMEOUT_MS = 8_000;
+const INTERACTIVE_OAUTH_TIMEOUT_MS = 45_000;
 const SESSION_TOKEN_KEY = 'pingcoach_oauth_session_v1';
 
 const PLACEHOLDER_CLIENT_IDS = new Set([
@@ -203,6 +204,7 @@ class GoogleAuthManager {
 
   /**
    * Forces a fresh token (used if Sheets API returns 401 Unauthorized).
+   * Never opens an unprompted interactive popup asynchronously (which browsers block and hang).
    */
   async forceRefreshToken(): Promise<string> {
     this.accessToken = null;
@@ -211,7 +213,10 @@ class GoogleAuthManager {
     try {
       return await this.requestToken('');
     } catch {
-      return await this.requestToken('consent');
+      this.emit();
+      throw new Error(
+        'Session Google expirée — cliquez sur le bouton Google en haut pour vous reconnecter.'
+      );
     }
   }
 
@@ -226,7 +231,17 @@ class GoogleAuthManager {
     try {
       return await this.requestToken('');
     } catch {
-      return await this.requestToken('consent');
+      // If current token is not yet hard-expired (only inside the 2-min buffer), still use it!
+      if (this.accessToken && !this.isTokenExpired()) {
+        return this.accessToken;
+      }
+      this.accessToken = null;
+      this.expiresAt = null;
+      this.persistSession();
+      this.emit();
+      throw new Error(
+        'Session Google expirée — cliquez sur le bouton Google en haut pour vous reconnecter.'
+      );
     }
   }
 
@@ -288,18 +303,23 @@ class GoogleAuthManager {
 
     this.inFlightPromise = new Promise<string>((resolve, reject) => {
       let settled = false;
-      const timer =
+      const timeoutMs =
         prompt === ''
-          ? window.setTimeout(() => {
-              if (!settled) {
-                settled = true;
-                this.inFlightPromise = null;
-                reject(
-                  new Error('Délai de rafraîchissement silencieux dépassé.')
-                );
-              }
-            }, SILENT_REFRESH_TIMEOUT_MS)
-          : null;
+          ? SILENT_REFRESH_TIMEOUT_MS
+          : INTERACTIVE_OAUTH_TIMEOUT_MS;
+      const timer = window.setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          this.inFlightPromise = null;
+          reject(
+            new Error(
+              prompt === ''
+                ? 'Délai de rafraîchissement silencieux dépassé.'
+                : 'La fenêtre de connexion Google a expiré ou a été bloquée par le navigateur.'
+            )
+          );
+        }
+      }, timeoutMs);
 
       const finish = (fn: () => void) => {
         if (settled) return;

@@ -94,5 +94,13 @@ describe('sheetsConnector parsers & range helpers', () => {
     expect(normalizeSheetDate('20/11/2026')).toBe('2026-11-20');
     expect(normalizeSheetDate('2026-11-20')).toBe('2026-11-20');
     expect(normalizeSheetDate(46346)).toBe('2026-11-20');
+
+    // Pre-filled formula/default columns (e.g. col H = 0, col I = "Oui") should not block findFirstFreeRow
+    const rowsWithPreFilledFormulas: unknown[][] = [
+      ['J-001', 'Marc', 1400, 'BS', 'BS', '', 5, 'Oui'],
+      ['', '', '', '', '', '', 0, 'Oui'],
+      ['', '', '', '', '', '', 0, 'Oui'],
+    ];
+    expect(findFirstFreeRow(rowsWithPreFilledFormulas, 4, [0, 1])).toBe(5);
   });
 });

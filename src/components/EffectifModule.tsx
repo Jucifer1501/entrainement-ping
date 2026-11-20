@@ -49,11 +49,13 @@ function PlayerModal({ initialPlayer, onClose, onSubmit }: PlayerModalProps) {
     initialPlayer?.active ?? 'Oui'
   );
   const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || saving) return;
     setSaving(true);
+    setFormError(null);
     try {
       await onSubmit(
         {
@@ -67,6 +69,12 @@ function PlayerModal({ initialPlayer, onClose, onSubmit }: PlayerModalProps) {
         initialPlayer
       );
       onClose();
+    } catch (err) {
+      setFormError(
+        err instanceof Error
+          ? err.message
+          : 'Erreur inattendue lors de l’enregistrement.'
+      );
     } finally {
       setSaving(false);
     }
@@ -198,6 +206,12 @@ function PlayerModal({ initialPlayer, onClose, onSubmit }: PlayerModalProps) {
               ))}
             </div>
           </div>
+
+          {formError && (
+            <div className="rounded-xl border border-red-500/40 bg-red-950/40 px-3.5 py-2.5 text-xs text-red-200">
+              {formError}
+            </div>
+          )}
 
           <div className="flex gap-3 pt-2">
             <button

@@ -580,19 +580,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         );
         pushToast('success', `${created.name} enregistré dans Google Sheets.`);
       } catch (err) {
+        const detail =
+          err instanceof Error ? err.message : 'Erreur réseau';
         setOutbox(
           outboxQueue.enqueue({
             id: generateActionId(),
             type: 'ADD_PLAYER',
             createdAt: new Date().toISOString(),
             retryCount: 1,
-            lastError: err instanceof Error ? err.message : 'Erreur réseau',
+            lastError: detail,
             payload: { tempId: optimisticId, input },
           })
         );
         pushToast(
           'warning',
-          `Ajout mis en file d'attente hors-ligne (${optimistic.name}).`
+          `${optimistic.name} enregistré localement (file d'attente) — ${detail}`
         );
       }
     },

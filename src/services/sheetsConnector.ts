@@ -356,11 +356,21 @@ export function computeNextCode(
 
 export function findFirstFreeRow(
   rows: unknown[][],
-  startRow1Based: number
+  startRow1Based: number,
+  requiredColumns?: readonly number[]
 ): number {
   let lastNonEmptyOffset = -1;
   for (let i = 0; i < rows.length; i++) {
-    if (!isRowEmpty(rows[i])) {
+    const row = rows[i];
+    const hasContent = requiredColumns
+      ? Boolean(
+          row &&
+            requiredColumns.some(
+              (colIdx) => String(row[colIdx] ?? '').trim() !== ''
+            )
+        )
+      : !isRowEmpty(row);
+    if (hasContent) {
       lastNonEmptyOffset = i;
     }
   }
@@ -395,6 +405,8 @@ async function extractSheetsErrorMessage(response: Response): Promise<string> {
   return `Google Sheets API (${response.status}) : ${detail}`;
 }
 
+const SHEETS_FETCH_TIMEOUT_MS = 15_000;
+
 async function sheetsFetch<T>(
   path: string,
   options: RequestInit = {},
@@ -404,14 +416,33 @@ async function sheetsFetch<T>(
   const spreadsheetId = getConfiguredSpreadsheetId();
   const url = `${SHEETS_API_BASE}/${encodeURIComponent(spreadsheetId)}${path}`;
 
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...(options.headers ?? {}),
-    },
-  });
+  const controller = new AbortController();
+  const timeoutId =
+    typeof window !== 'undefined'
+      ? window.setTimeout(() => controller.abort(), SHEETS_FETCH_TIMEOUT_MS)
+      : null;
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        ...(options.headers ?? {}),
+      },
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error(
+        'Délai de réponse Google Sheets dépassé (15 s). Vérifiez votre connexion réseau.'
+      );
+    }
+    throw err;
+  } finally {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+  }
 
   if (response.status === 401 && retryOn401) {
     await googleAuth.forceRefreshToken();
@@ -486,7 +517,8 @@ async function getSheetNumericId(sheetTitle: string): Promise<number> {
 export async function addPlayerToSheet(input: PlayerInput): Promise<Player> {
   const existingRows = await getRawRange(SHEET_RANGES.PLAYERS);
   const existingPlayers = parsePlayersRows(existingRows);
-  const nextRow = findFirstFreeRow(existingRows, 4);
+  // Check only ID_Joueur (col B = idx 0) and Nom (col C = idx 1) so pre-filled dropdowns/formulas in H/I don't block insertion
+  const nextRow = findFirstFreeRow(existingRows, 4, [0, 1]);
   if (nextRow > 100) {
     throw new Error('Plage Profils joueurs (B4:I100) pleine.');
   }
@@ -749,7 +781,8 @@ export async function closeSessionAtomic(
   }
 
   const rawSessions = await getRawRange(SHEET_RANGES.SESSIONS);
-  const firstFreeRow = findFirstFreeRow(rawSessions, 7);
+  // Check Date (col B = idx 0) and Exercice (col E = idx 3) so pre-formatted rows don't skip lines
+  const firstFreeRow = findFirstFreeRow(rawSessions, 7, [0, 3]);
   const endRow = firstFreeRow + completedExercises.length - 1;
 
   if (endRow > 500) {
