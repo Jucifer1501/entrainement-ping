@@ -267,6 +267,7 @@ export function ExercicesModule() {
     savePreparation,
     launchLiveSession,
     pushToast,
+    isReadOnly,
   } = useApp();
 
   const [search, setSearch] = useState('');
@@ -459,17 +460,19 @@ export function ExercicesModule() {
                 Mémo Picot
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => {
-                setEditingExercise(null);
-                setModalOpen(true);
-              }}
-              className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-bold text-zinc-950 hover:bg-amber-400"
-            >
-              <Plus className="h-4 w-4" />
-              Nouvel exercice
-            </button>
+            {!isReadOnly && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingExercise(null);
+                  setModalOpen(true);
+                }}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-bold text-zinc-950 hover:bg-amber-400"
+              >
+                <Plus className="h-4 w-4" />
+                Nouvel exercice
+              </button>
+            )}
           </div>
         </div>
 
@@ -623,17 +626,19 @@ export function ExercicesModule() {
                 </div>
 
                 <div className="flex shrink-0 items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingExercise(exo);
-                      setModalOpen(true);
-                    }}
-                    className="flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-white"
-                    aria-label={`Modifier ${exo.name}`}
-                  >
-                    <Edit3 className="h-4 w-4" />
-                  </button>
+                  {!isReadOnly && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingExercise(exo);
+                        setModalOpen(true);
+                      }}
+                      className="flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-white"
+                      aria-label={`Modifier ${exo.name}`}
+                    >
+                      <Edit3 className="h-4 w-4" />
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => addExerciseToPlan(exo)}
@@ -842,15 +847,25 @@ export function ExercicesModule() {
 
           {/* Primary Actions */}
           <div className="mt-4 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-            <button
-              type="button"
-              disabled={savingPlan || preparation.length === 0}
-              onClick={handleSavePreparation}
-              className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm font-bold text-white transition hover:border-amber-400 hover:text-amber-300 disabled:opacity-40"
-            >
-              <Save className="h-4 w-4" />
-              {savingPlan ? 'Sauvegarde...' : 'Sauver Préparation'}
-            </button>
+            {isReadOnly ? (
+              <div
+                className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-xs font-semibold text-sky-300"
+                title="Sauvegarde Google Sheets désactivée en mode lecture seule"
+              >
+                <Save className="h-4 w-4 opacity-60" />
+                Lecture seule (non sauvegardé)
+              </div>
+            ) : (
+              <button
+                type="button"
+                disabled={savingPlan || preparation.length === 0}
+                onClick={handleSavePreparation}
+                className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm font-bold text-white transition hover:border-amber-400 hover:text-amber-300 disabled:opacity-40"
+              >
+                <Save className="h-4 w-4" />
+                {savingPlan ? 'Sauvegarde...' : 'Sauver Préparation'}
+              </button>
+            )}
 
             <button
               type="button"

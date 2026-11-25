@@ -193,9 +193,18 @@ export type OutboxAction =
 export type AppTab = 'effectif' | 'exercices' | 'live' | 'cloture' | 'historique';
 
 export type DataSource = 'empty' | 'loading' | 'google';
+export type AuthMode = 'none' | 'google' | 'viewer';
+
+export interface ViewerUser {
+  email: string;
+  name: string;
+  role: 'viewer';
+}
 
 export interface SyncStatus {
-  mode: 'google' | 'local';
+  mode: 'google' | 'viewer' | 'local';
+  authMode: AuthMode;
+  isReadOnly: boolean;
   dataSource: DataSource;
   spreadsheetId: string;
   isOnline: boolean;

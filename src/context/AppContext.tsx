@@ -11,6 +11,7 @@ import React, {
 } from 'react';
 import type {
   AppTab,
+  AuthMode,
   DataSource,
   Exercise,
   ExerciseBankData,
@@ -25,6 +26,7 @@ import type {
   SessionClosurePayload,
   SessionLogRow,
   SyncStatus,
+  ViewerUser,
 } from '@/types';
 import {
   EMPTY_EXERCISE_BANK,
@@ -36,6 +38,7 @@ import {
   savePreparationToSheet,
   updateExerciseInSheet,
   updatePlayerInSheet,
+  type FullSheetSnapshot,
 } from '@/services/sheetsConnector';
 import {
   DEFAULT_SPREADSHEET_ID,
@@ -94,12 +97,17 @@ interface AppContextValue {
   markLiveExerciseCompleted: (localId: string, completed?: boolean) => void;
   launchLiveSession: () => void;
 
-  // CRUD & Sync
+  // Auth, Role & Sync
   syncStatus: SyncStatus;
   outbox: OutboxAction[];
+  authMode: AuthMode;
+  viewerUser: ViewerUser | null;
+  isReadOnly: boolean;
   isSignedIn: boolean;
   signInGoogle: () => Promise<void>;
+  signInWithPassword: (email: string, password: string) => Promise<void>;
   signOutGoogle: () => void;
+  signOut: () => Promise<void>;
   syncNow: () => Promise<void>;
   addPlayer: (input: PlayerInput) => Promise<void>;
   updatePlayer: (player: Player) => Promise<void>;
@@ -156,14 +164,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [oddMode, setOddMode] = useState<OddMode>('GROUPE_3');
   const [pairings, setPairings] = useState<PairingResult>(EMPTY_PAIRINGS);
 
-  // Live & Closure tracking (initialized deterministically for SSR, populated in useEffect)
+  // Live & Closure tracking
   const [activeSessionId, setActiveSessionId] = useState<string>('');
   const [liveCompletedLocalIds, setLiveCompletedLocalIds] = useState<string[]>(
     []
   );
 
   // Sync & Auth
-  const [isSignedIn, setIsSignedIn] = useState(false);
+  const [authMode, setAuthMode] = useState<AuthMode>('none');
+  const [viewerUser, setViewerUser] = useState<ViewerUser | null>(null);
   const [isOnline, setIsOnline] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -177,10 +186,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const syncingRef = useRef(false);
   const dataSourceRef = useRef<DataSource>('empty');
+  const authModeRef = useRef<AuthMode>('none');
+
+  const isSignedIn = authMode === 'google' || authMode === 'viewer';
+  const isReadOnly = authMode === 'viewer';
 
   useEffect(() => {
     dataSourceRef.current = dataSource;
   }, [dataSource]);
+
+  useEffect(() => {
+    authModeRef.current = authMode;
+  }, [authMode]);
 
   const pushToast = useCallback((tone: ToastMessage['tone'], text: string) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -196,7 +213,113 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Flush outbox + pull fresh canonical snapshot from Google Sheets
+  const applyFetchedSnapshot = useCallback(
+    (activeSheetId: string, snapshot: FullSheetSnapshot) => {
+      const nowIso = new Date().toISOString();
+      setSpreadsheetId(activeSheetId);
+      setPlayers(snapshot.players);
+      setExerciseBank(snapshot.exerciseBank);
+      setPreparation(snapshot.preparation);
+      setSessions(snapshot.sessions);
+      setDataSource('google');
+      setLastSyncedAt(nowIso);
+
+      setPresentPlayerIds((prev) => {
+        const validIds = new Set(snapshot.players.map((p) => p.id));
+        return prev.filter((id) => validIds.has(id));
+      });
+
+      localCache.saveGoogleSnapshot({
+        spreadsheetId: activeSheetId,
+        syncedAt: nowIso,
+        players: snapshot.players,
+        exerciseBank: snapshot.exerciseBank,
+        preparation: snapshot.preparation,
+        sessions: snapshot.sessions,
+      });
+      localCache.saveLastSynced(nowIso);
+    },
+    []
+  );
+
+  // Pull read-only snapshot from server Service Account API (/api/sheets/read)
+  const pullReadOnlySnapshot = useCallback(
+    async (silent = false) => {
+      if (syncingRef.current) return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        if (!silent) {
+          pushToast('warning', 'Hors ligne — affichage du dernier cache local.');
+        }
+        return;
+      }
+
+      syncingRef.current = true;
+      setIsSyncing(true);
+      setSyncError(null);
+      if (dataSourceRef.current !== 'google') {
+        setDataSource('loading');
+      }
+
+      try {
+        const res = await fetch('/api/sheets/read', {
+          method: 'GET',
+          credentials: 'same-origin',
+          cache: 'no-store',
+        });
+
+        const payload = (await res.json().catch(() => null)) as {
+          spreadsheetId?: string;
+          snapshot?: FullSheetSnapshot;
+          error?: string;
+        } | null;
+
+        if (res.status === 401) {
+          setAuthMode('none');
+          setViewerUser(null);
+          throw new Error(
+            payload?.error || 'Session lecteur expirée. Veuillez vous reconnecter.'
+          );
+        }
+
+        if (!res.ok || !payload?.snapshot) {
+          throw new Error(
+            payload?.error ||
+              `Impossible de lire Google Sheets (${res.status}).`
+          );
+        }
+
+        applyFetchedSnapshot(
+          payload.spreadsheetId || getConfiguredSpreadsheetId(),
+          payload.snapshot
+        );
+
+        if (!silent) {
+          pushToast(
+            'success',
+            `Données chargées (lecture seule) : ${payload.snapshot.players.length} joueurs, ${payload.snapshot.exerciseBank.exercises.length} exercices.`
+          );
+        }
+      } catch (err) {
+        const message =
+          err instanceof Error
+            ? err.message
+            : 'Erreur lors de la lecture Google Sheets.';
+        setSyncError(message);
+        if (dataSourceRef.current === 'loading') {
+          setDataSource('empty');
+        }
+        if (!silent) {
+          pushToast('error', message);
+        }
+      } finally {
+        syncingRef.current = false;
+        setIsSyncing(false);
+      }
+    },
+    [applyFetchedSnapshot, pushToast]
+  );
+
+  // Flush outbox + pull fresh canonical snapshot from Google Sheets (Admin OAuth)
   const flushOutboxAndPull = useCallback(
     async (silent = false) => {
       if (syncingRef.current) return;
@@ -253,31 +376,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }
         }
 
-        // 2. Pull fresh canonical state from ALL 4 real tabs of NEXT_PUBLIC_SPREADSHEET_ID
+        // 2. Pull fresh canonical state from ALL 4 real tabs
         const snapshot = await fetchAllSheetData();
-        const nowIso = new Date().toISOString();
-
-        setPlayers(snapshot.players);
-        setExerciseBank(snapshot.exerciseBank);
-        setPreparation(snapshot.preparation);
-        setSessions(snapshot.sessions);
-        setDataSource('google');
-        setLastSyncedAt(nowIso);
-
-        setPresentPlayerIds((prev) => {
-          const validIds = new Set(snapshot.players.map((p) => p.id));
-          return prev.filter((id) => validIds.has(id));
-        });
-
-        localCache.saveGoogleSnapshot({
-          spreadsheetId: activeSheetId,
-          syncedAt: nowIso,
-          players: snapshot.players,
-          exerciseBank: snapshot.exerciseBank,
-          preparation: snapshot.preparation,
-          sessions: snapshot.sessions,
-        });
-        localCache.saveLastSynced(nowIso);
+        applyFetchedSnapshot(activeSheetId, snapshot);
 
         if (!silent) {
           pushToast(
@@ -300,12 +401,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setIsSyncing(false);
       }
     },
-    [pushToast]
+    [applyFetchedSnapshot, pushToast]
   );
 
   // Hydrate once on client mount (strictly AFTER initial render so SSR === Client hydration)
   useEffect(() => {
-    // Purge any legacy v1 demo localStorage entries from earlier versions
     try {
       LEGACY_DEMO_KEYS.forEach((key) => window.localStorage.removeItem(key));
     } catch {
@@ -319,36 +419,64 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setIsOnline(typeof navigator !== 'undefined' ? navigator.onLine : true);
     setOutbox(outboxQueue.getAll());
 
-    const restoredAuth = googleAuth.restoreSession();
-    setIsSignedIn(restoredAuth);
-
     const cachedGoogle = localCache.loadGoogleSnapshot(activeSheetId);
     const cachedPresent = localCache.loadPresentIds();
 
-    if (cachedGoogle) {
-      setPlayers(cachedGoogle.players);
-      setExerciseBank(cachedGoogle.exerciseBank);
-      setPreparation(cachedGoogle.preparation);
-      setSessions(cachedGoogle.sessions);
-      setLastSyncedAt(cachedGoogle.syncedAt);
-      const validIds = new Set(cachedGoogle.players.map((p) => p.id));
-      setPresentPlayerIds(cachedPresent.filter((id) => validIds.has(id)));
-      setDataSource('google');
-    } else {
-      setPlayers([]);
-      setExerciseBank(EMPTY_EXERCISE_BANK);
-      setPreparation([]);
-      setSessions([]);
-      setPresentPlayerIds([]);
-      setDataSource(restoredAuth ? 'loading' : 'empty');
+    const restoreCachedData = () => {
+      if (cachedGoogle) {
+        setPlayers(cachedGoogle.players);
+        setExerciseBank(cachedGoogle.exerciseBank);
+        setPreparation(cachedGoogle.preparation);
+        setSessions(cachedGoogle.sessions);
+        setLastSyncedAt(cachedGoogle.syncedAt);
+        const validIds = new Set(cachedGoogle.players.map((p) => p.id));
+        setPresentPlayerIds(cachedPresent.filter((id) => validIds.has(id)));
+        setDataSource('google');
+        return true;
+      }
+      return false;
+    };
+
+    const restoredGoogleAuth = googleAuth.restoreSession();
+    if (restoredGoogleAuth) {
+      setAuthMode('google');
+      if (!restoreCachedData()) {
+        setDataSource('loading');
+      }
+      setHydrated(true);
+      void flushOutboxAndPull(true);
+      return;
     }
 
+    // Check if an HttpOnly Email/Password viewer session cookie is active
+    const hasCache = restoreCachedData();
     setHydrated(true);
 
-    if (restoredAuth) {
-      void flushOutboxAndPull(true);
-    }
-  }, [flushOutboxAndPull]);
+    void (async () => {
+      try {
+        const res = await fetch('/api/auth/me', {
+          method: 'GET',
+          credentials: 'same-origin',
+          cache: 'no-store',
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          authenticated?: boolean;
+          user?: ViewerUser | null;
+        };
+        if (data.authenticated && data.user) {
+          setViewerUser(data.user);
+          setAuthMode('viewer');
+          if (!hasCache) {
+            setDataSource('loading');
+          }
+          await pullReadOnlySnapshot(true);
+        }
+      } catch {
+        // Offline or unreachable — keep cached state if available
+      }
+    })();
+  }, [flushOutboxAndPull, pullReadOnlySnapshot]);
 
   // Persist verified Google Sheets data into offline cache
   useEffect(() => {
@@ -385,7 +513,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // Subscribe to googleAuth state
   useEffect(() => {
     return googleAuth.subscribe(() => {
-      setIsSignedIn(googleAuth.isSignedIn());
+      if (googleAuth.isSignedIn()) {
+        setAuthMode('google');
+        setViewerUser(null);
+      } else if (authModeRef.current === 'google') {
+        setAuthMode('none');
+      }
     });
   }, []);
 
@@ -468,18 +601,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setActiveTab('live');
   }, [preparation.length, pushToast]);
 
-  // Monitor online/offline events and auto-flush outbox when connectivity returns
+  // Monitor online/offline events
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
       pushToast('info', 'Connexion rétablie.');
-      if (googleAuth.isSignedIn()) {
+      if (authModeRef.current === 'google' && googleAuth.isSignedIn()) {
         void flushOutboxAndPull(true);
+      } else if (authModeRef.current === 'viewer') {
+        void pullReadOnlySnapshot(true);
       }
     };
     const handleOffline = () => {
       setIsOnline(false);
-      pushToast('warning', 'Mode hors-ligne actif (file locale prête).');
+      pushToast('warning', 'Mode hors-ligne actif.');
     };
 
     window.addEventListener('online', handleOnline);
@@ -488,24 +623,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [flushOutboxAndPull, pushToast]);
+  }, [flushOutboxAndPull, pullReadOnlySnapshot, pushToast]);
 
-  // Proactive background silent refresh every 10 minutes during long >60min sessions
+  // Proactive background silent refresh every 10 minutes during long >60min Google OAuth sessions
   useEffect(() => {
-    if (!isSignedIn) return;
+    if (authMode !== 'google') return;
     const interval = window.setInterval(() => {
       if (navigator.onLine) {
         void googleAuth.refreshSilentlyIfNeeded();
       }
     }, 10 * 60 * 1000);
     return () => window.clearInterval(interval);
-  }, [isSignedIn]);
+  }, [authMode]);
 
   const signInGoogle = useCallback(async () => {
     setSyncError(null);
     try {
       await googleAuth.signIn('select_account');
-      setIsSignedIn(true);
+      setViewerUser(null);
+      setAuthMode('google');
       await flushOutboxAndPull(false);
     } catch (err) {
       const msg =
@@ -515,9 +651,42 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, [flushOutboxAndPull, pushToast]);
 
+  const signInWithPassword = useCallback(
+    async (email: string, password: string) => {
+      setSyncError(null);
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ email, password }),
+      });
+
+      const data = (await res.json().catch(() => null)) as {
+        user?: ViewerUser;
+        error?: string;
+      } | null;
+
+      if (!res.ok || !data?.user) {
+        const msg = data?.error || 'Connexion impossible.';
+        throw new Error(msg);
+      }
+
+      // Clear any Google OAuth token when switching to read-only viewer account
+      if (googleAuth.isSignedIn()) {
+        googleAuth.signOut();
+      }
+
+      setViewerUser(data.user);
+      setAuthMode('viewer');
+      await pullReadOnlySnapshot(false);
+    },
+    [pullReadOnlySnapshot]
+  );
+
   const signOutGoogle = useCallback(() => {
     googleAuth.signOut();
-    setIsSignedIn(false);
+    setAuthMode('none');
+    setViewerUser(null);
     setSyncError(null);
     pushToast(
       'info',
@@ -525,16 +694,61 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     );
   }, [pushToast]);
 
+  const signOut = useCallback(async () => {
+    if (authModeRef.current === 'viewer') {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          credentials: 'same-origin',
+        });
+      } catch {
+        // Ignore network errors on logout
+      }
+      setViewerUser(null);
+      setAuthMode('none');
+      setSyncError(null);
+      // Clear cached data on explicit viewer logout so next person sees clean login screen
+      localCache.clearGoogleSnapshot();
+      setPlayers([]);
+      setExerciseBank(EMPTY_EXERCISE_BANK);
+      setPreparation([]);
+      setSessions([]);
+      setPresentPlayerIds([]);
+      setDataSource('empty');
+      pushToast('info', 'Déconnecté du mode lecture seule.');
+      return;
+    }
+
+    signOutGoogle();
+  }, [pushToast, signOutGoogle]);
+
   const syncNow = useCallback(async () => {
+    if (authModeRef.current === 'viewer') {
+      await pullReadOnlySnapshot(false);
+      return;
+    }
     await flushOutboxAndPull(false);
-  }, [flushOutboxAndPull]);
+  }, [flushOutboxAndPull, pullReadOnlySnapshot]);
 
   // ============================================================================
-  // CRUD Mutations (Online -> Google Sheets | Offline -> Cache + Outbox)
+  // CRUD Mutations (HARD-BLOCKED in Read-Only Viewer Mode!)
   // ============================================================================
+
+  const blockIfReadOnly = useCallback((): boolean => {
+    if (authModeRef.current === 'viewer') {
+      pushToast(
+        'warning',
+        'Mode lecture seule : aucune modification du Google Sheets n’est autorisée.'
+      );
+      return true;
+    }
+    return false;
+  }, [pushToast]);
 
   const addPlayer = useCallback(
     async (input: PlayerInput) => {
+      if (blockIfReadOnly()) return;
+
       const optimisticId = computeNextCode(
         players.map((p) => p.id),
         'J'
@@ -598,11 +812,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         );
       }
     },
-    [players, pushToast]
+    [blockIfReadOnly, players, pushToast]
   );
 
   const updatePlayer = useCallback(
     async (player: Player) => {
+      if (blockIfReadOnly()) return;
+
       setPlayers((prev) =>
         prev.map((p) =>
           p.rowIndex === player.rowIndex && p.id === player.id ? player : p
@@ -640,11 +856,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         pushToast('warning', `Modification mise en file d'attente.`);
       }
     },
-    [pushToast]
+    [blockIfReadOnly, pushToast]
   );
 
   const addExercise = useCallback(
     async (input: ExerciseInput) => {
+      if (blockIfReadOnly()) return;
+
       const tempId = computeNextCode(
         exerciseBank.exercises.map((e) => e.id),
         'EXO'
@@ -718,11 +936,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         pushToast('warning', `Insertion exercice mise en file d'attente.`);
       }
     },
-    [exerciseBank, pushToast]
+    [blockIfReadOnly, exerciseBank, pushToast]
   );
 
   const updateExercise = useCallback(
     async (exercise: Exercise) => {
+      if (blockIfReadOnly()) return;
+
       setExerciseBank((prev) => ({
         ...prev,
         exercises: prev.exercises.map((e) =>
@@ -763,11 +983,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         pushToast('warning', `Modification exercice mise en file d'attente.`);
       }
     },
-    [pushToast]
+    [blockIfReadOnly, pushToast]
   );
 
   const savePreparation = useCallback(
     async (items: PreparationItem[]) => {
+      if (blockIfReadOnly()) return;
+
       const normalized = items.map((item, idx) => ({
         ...item,
         order: idx + 1,
@@ -808,7 +1030,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         pushToast('warning', 'Sauvegarde Préparation mise en file d’attente.');
       }
     },
-    [pushToast]
+    [blockIfReadOnly, pushToast]
   );
 
   const applyLocalClosureOptimistically = useCallback(
@@ -864,6 +1086,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     async (
       payload: SessionClosurePayload
     ): Promise<{ queued: boolean; alreadyArchived?: boolean }> => {
+      if (blockIfReadOnly()) {
+        return { queued: false, alreadyArchived: false };
+      }
+
       const alreadyLocal = sessions.some(
         (row) => row.sessionId === payload.sessionId
       );
@@ -892,14 +1118,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       try {
         const result = await closeSessionAtomic(payload);
         const snapshot = await fetchAllSheetData();
-        setPlayers(snapshot.players);
-        setExerciseBank(snapshot.exerciseBank);
-        setPreparation(snapshot.preparation);
-        setSessions(snapshot.sessions);
-        setDataSource('google');
-        const nowIso = new Date().toISOString();
-        setLastSyncedAt(nowIso);
-        localCache.saveLastSynced(nowIso);
+        applyFetchedSnapshot(getConfiguredSpreadsheetId(), snapshot);
         resetActiveSessionId();
 
         if (result.alreadyArchived) {
@@ -937,22 +1156,37 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return { queued: true };
       }
     },
-    [applyLocalClosureOptimistically, pushToast, resetActiveSessionId, sessions]
+    [
+      applyFetchedSnapshot,
+      applyLocalClosureOptimistically,
+      blockIfReadOnly,
+      pushToast,
+      resetActiveSessionId,
+      sessions,
+    ]
   );
 
   const syncStatus: SyncStatus = useMemo(
     () => ({
-      mode: isSignedIn ? 'google' : 'local',
+      mode:
+        authMode === 'google'
+          ? 'google'
+          : authMode === 'viewer'
+            ? 'viewer'
+            : 'local',
+      authMode,
+      isReadOnly,
       dataSource,
       spreadsheetId,
       isOnline,
       isSyncing,
       lastSyncedAt,
-      pendingCount: outbox.length,
+      pendingCount: isReadOnly ? 0 : outbox.length,
       error: syncError,
     }),
     [
-      isSignedIn,
+      authMode,
+      isReadOnly,
       dataSource,
       spreadsheetId,
       isOnline,
@@ -991,9 +1225,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     launchLiveSession,
     syncStatus,
     outbox,
+    authMode,
+    viewerUser,
+    isReadOnly,
     isSignedIn,
     signInGoogle,
+    signInWithPassword,
     signOutGoogle,
+    signOut,
     syncNow,
     addPlayer,
     updatePlayer,

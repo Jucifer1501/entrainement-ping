@@ -257,6 +257,7 @@ export function EffectifModule() {
     swapPairingsPlayers,
     addPlayer,
     updatePlayer,
+    isReadOnly,
   } = useApp();
 
   const [search, setSearch] = useState('');
@@ -335,17 +336,19 @@ export function EffectifModule() {
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              setEditingPlayer(null);
-              setModalOpen(true);
-            }}
-            className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-bold text-zinc-950 shadow-lg shadow-amber-500/10 transition hover:bg-amber-400 active:scale-[0.98]"
-          >
-            <Plus className="h-4 w-4" />
-            Nouveau joueur
-          </button>
+          {!isReadOnly && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingPlayer(null);
+                setModalOpen(true);
+              }}
+              className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-bold text-zinc-950 shadow-lg shadow-amber-500/10 transition hover:bg-amber-400 active:scale-[0.98]"
+            >
+              <Plus className="h-4 w-4" />
+              Nouveau joueur
+            </button>
+          )}
         </div>
 
         {/* Picot detection indicator */}
@@ -495,17 +498,19 @@ export function EffectifModule() {
                     <UserCheck className="h-3.5 w-3.5 text-emerald-400" />
                     {player.participations}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingPlayer(player);
-                      setModalOpen(true);
-                    }}
-                    className="flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-white"
-                    aria-label={`Modifier ${player.name}`}
-                  >
-                    <Edit3 className="h-4 w-4" />
-                  </button>
+                  {!isReadOnly && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingPlayer(player);
+                        setModalOpen(true);
+                      }}
+                      className="flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-white"
+                      aria-label={`Modifier ${player.name}`}
+                    >
+                      <Edit3 className="h-4 w-4" />
+                    </button>
+                  )}
                 </div>
               </div>
             );

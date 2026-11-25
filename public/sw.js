@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'pingcoach-v2';
+const CACHE_VERSION = 'pingcoach-v3';
 const APP_SHELL_URLS = [
   '/',
   '/manifest.json',
@@ -45,8 +45,9 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Never intercept dev HMR or localhost dev chunks
+  // Never intercept API routes, dev HMR or localhost dev chunks
   if (
+    url.pathname.startsWith('/api/') ||
     url.hostname === 'localhost' ||
     url.hostname === '127.0.0.1' ||
     url.pathname.includes('webpack-hmr')

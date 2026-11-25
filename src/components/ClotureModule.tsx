@@ -27,6 +27,7 @@ export function ClotureModule() {
     archiveSession,
     setActiveTab,
     syncStatus,
+    isReadOnly,
   } = useApp();
 
   const [date, setDate] = useState(
@@ -376,19 +377,26 @@ export function ClotureModule() {
           </li>
         </ul>
 
-        <button
-          type="button"
-          disabled={archiving || completedItems.length === 0}
-          onClick={handleArchive}
-          className="mt-5 flex min-h-[56px] w-full items-center justify-center gap-2.5 rounded-2xl bg-amber-500 px-6 py-4 text-base font-black text-zinc-950 shadow-lg shadow-amber-500/20 transition hover:bg-amber-400 active:scale-[0.99] disabled:opacity-40"
-        >
-          <Archive className="h-5 w-5" />
-          {archiving
-            ? 'Archivage en cours...'
-            : syncStatus.mode === 'google' && !syncStatus.isOnline
-              ? 'Enregistrer en file d’attente hors-ligne'
-              : 'Clôturer et archiver la séance'}
-        </button>
+        {isReadOnly ? (
+          <div className="mt-5 rounded-2xl border border-sky-500/40 bg-sky-500/10 px-4 py-4 text-center text-sm font-semibold text-sky-200">
+            Mode lecture seule actif — Seul un entraîneur connecté avec Google
+            OAuth peut clôturer et archiver une séance dans Google Sheets.
+          </div>
+        ) : (
+          <button
+            type="button"
+            disabled={archiving || completedItems.length === 0}
+            onClick={handleArchive}
+            className="mt-5 flex min-h-[56px] w-full items-center justify-center gap-2.5 rounded-2xl bg-amber-500 px-6 py-4 text-base font-black text-zinc-950 shadow-lg shadow-amber-500/20 transition hover:bg-amber-400 active:scale-[0.99] disabled:opacity-40"
+          >
+            <Archive className="h-5 w-5" />
+            {archiving
+              ? 'Archivage en cours...'
+              : syncStatus.mode === 'google' && !syncStatus.isOnline
+                ? 'Enregistrer en file d’attente hors-ligne'
+                : 'Clôturer et archiver la séance'}
+          </button>
+        )}
       </div>
     </div>
   );

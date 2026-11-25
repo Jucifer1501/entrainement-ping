@@ -8,8 +8,12 @@ import {
   BookOpen,
   Cloud,
   CloudOff,
+  Eye,
   Loader2,
+  Lock,
   LogIn,
+  LogOut,
+  Mail,
   Radio,
   RefreshCw,
   Settings,
@@ -43,8 +47,13 @@ export function AppShell() {
   const {
     activeTab,
     setActiveTab,
+    authMode,
+    viewerUser,
+    isReadOnly,
     isSignedIn,
     signInGoogle,
+    signInWithPassword,
+    signOut,
     syncNow,
     syncStatus,
     presentPlayers,
@@ -53,6 +62,27 @@ export function AppShell() {
   } = useApp();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+
+  const handleViewerLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginEmail.trim() || !loginPassword || loginBusy) return;
+    setLoginBusy(true);
+    setLoginError(null);
+    try {
+      await signInWithPassword(loginEmail.trim(), loginPassword);
+      setLoginPassword('');
+    } catch (err) {
+      setLoginError(
+        err instanceof Error ? err.message : 'Connexion impossible.'
+      );
+    } finally {
+      setLoginBusy(false);
+    }
+  };
 
   return (
     <div className="min-h-dvh bg-obsidian text-zinc-100">
@@ -80,7 +110,10 @@ export function AppShell() {
           </button>
 
           {/* Desktop / iPad Navigation */}
-          <nav className="hidden items-center gap-1 md:flex" aria-label="Navigation principale">
+          <nav
+            className="hidden items-center gap-1 md:flex"
+            aria-label="Navigation principale"
+          >
             {NAV_ITEMS.map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
@@ -113,7 +146,7 @@ export function AppShell() {
               </span>
             )}
 
-            {syncStatus.pendingCount > 0 && (
+            {!isReadOnly && syncStatus.pendingCount > 0 && (
               <button
                 type="button"
                 onClick={() => setSettingsOpen(true)}
@@ -124,7 +157,38 @@ export function AppShell() {
               </button>
             )}
 
-            {isSignedIn ? (
+            {authMode === 'viewer' ? (
+              <>
+                <span
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-sky-500/40 bg-sky-500/15 px-2.5 py-1.5 text-xs font-bold text-sky-300"
+                  title={`Connecté en lecture seule (${viewerUser?.email ?? ''})`}
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Lecture seule</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void syncNow()}
+                  disabled={syncStatus.isSyncing}
+                  className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-sky-400 hover:text-sky-300"
+                  title="Actualiser les données"
+                  aria-label="Actualiser les données"
+                >
+                  <RefreshCw
+                    className={`h-4 w-4 ${syncStatus.isSyncing ? 'animate-spin' : ''}`}
+                  />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void signOut()}
+                  className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-red-500/50 hover:text-red-300"
+                  title="Déconnexion"
+                  aria-label="Déconnexion"
+                >
+                  <LogOut className="h-4 w-4" />
+                </button>
+              </>
+            ) : authMode === 'google' ? (
               <button
                 type="button"
                 onClick={() => void syncNow()}
@@ -151,18 +215,20 @@ export function AppShell() {
               </button>
             )}
 
-            <button
-              type="button"
-              onClick={() => setSettingsOpen(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-white"
-              aria-label="Paramètres Google Sheets"
-            >
-              {syncStatus.mode === 'google' ? (
-                <Settings className="h-4 w-4" />
-              ) : (
-                <CloudOff className="h-4 w-4" />
-              )}
-            </button>
+            {authMode !== 'viewer' && (
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(true)}
+                className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-white"
+                aria-label="Paramètres Google Sheets"
+              >
+                {authMode === 'google' ? (
+                  <Settings className="h-4 w-4" />
+                ) : (
+                  <CloudOff className="h-4 w-4" />
+                )}
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -173,7 +239,28 @@ export function AppShell() {
           activeTab === 'live' ? '' : 'pb-24 md:pb-8'
         }`}
       >
-        {/* Error banner (shown on OAuth or Google Sheets error, NEVER falls back to demo data) */}
+        {/* Read-Only Banner for Email/Password Viewers */}
+        {isReadOnly && activeTab !== 'live' && (
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-sky-500/35 bg-sky-500/10 px-4 py-2.5 text-xs text-sky-200">
+            <span className="flex items-center gap-2">
+              <Eye className="h-4 w-4 shrink-0 text-sky-400" />
+              <span>
+                Connecté en <strong>mode lecture seule</strong> (
+                {viewerUser?.name ?? viewerUser?.email}) — Consultation libre
+                sans modification du Google Sheets.
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className="rounded-lg border border-sky-500/30 bg-zinc-950/60 px-2.5 py-1 text-[11px] font-semibold text-sky-200 hover:bg-zinc-900"
+            >
+              Déconnexion
+            </button>
+          </div>
+        )}
+
+        {/* Error banner (NEVER falls back to demo data) */}
         {syncStatus.error && (
           <div className="mb-5 flex flex-wrap items-start justify-between gap-3 rounded-2xl border border-red-500/40 bg-red-950/40 p-4 text-xs text-red-200">
             <div className="flex items-start gap-2.5">
@@ -207,18 +294,20 @@ export function AppShell() {
                   Connexion Google
                 </button>
               )}
-              <button
-                type="button"
-                onClick={() => setSettingsOpen(true)}
-                className="rounded-xl border border-red-500/40 bg-zinc-950/60 px-3 py-2 text-xs font-semibold text-red-200 hover:bg-zinc-900"
-              >
-                Paramètres
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(true)}
+                  className="rounded-xl border border-red-500/40 bg-zinc-950/60 px-3 py-2 text-xs font-semibold text-red-200 hover:bg-zinc-900"
+                >
+                  Paramètres
+                </button>
+              )}
             </div>
           </div>
         )}
 
-        {/* Loading state while fetching real Google Sheets right after OAuth */}
+        {/* Loading state while fetching real Google Sheets right after login */}
         {syncStatus.dataSource === 'loading' && syncStatus.isSyncing ? (
           <div className="mx-auto flex max-w-md flex-col items-center justify-center rounded-3xl border border-zinc-800 bg-zinc-950 px-6 py-14 text-center">
             <Loader2 className="h-8 w-8 animate-spin text-amber-400" />
@@ -226,43 +315,134 @@ export function AppShell() {
               Chargement de votre Google Sheets…
             </p>
             <p className="mt-1 text-xs text-zinc-400">
-              Lecture des onglets Profils joueurs, Banque Exo, Préparation et Séances.
+              Lecture des onglets Profils joueurs, Banque Exo, Préparation et
+              Séances.
             </p>
           </div>
         ) : !isSignedIn && syncStatus.dataSource === 'empty' ? (
-          <div className="mx-auto max-w-lg rounded-3xl border border-zinc-800 bg-zinc-950 p-6 text-center sm:p-8">
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-500/15 text-amber-400">
-              <Cloud className="h-7 w-7" />
+          <div className="mx-auto grid max-w-4xl grid-cols-1 gap-5 md:grid-cols-2">
+            {/* Admin Google OAuth Login Card */}
+            <div className="flex flex-col justify-between rounded-3xl border border-zinc-800 bg-zinc-950 p-6 sm:p-7">
+              <div>
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/15 text-amber-400">
+                  <Cloud className="h-6 w-6" />
+                </div>
+                <h2 className="mt-4 text-xl font-extrabold text-white">
+                  Accès Entraîneur (Google)
+                </h2>
+                <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                  Accès complet en <strong>lecture et écriture</strong> sur le
+                  classeur{' '}
+                  <code className="rounded bg-zinc-900 px-1.5 py-0.5 text-xs text-amber-300">
+                    {syncStatus.spreadsheetId.slice(0, 14)}…
+                  </code>
+                  . Ajout de joueurs, d’exercices, sauvegarde de préparation et
+                  clôture de séances.
+                </p>
+              </div>
+
+              <div className="mt-6 flex flex-col gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => void signInGoogle()}
+                  className="inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-amber-500 px-6 py-3 text-sm font-black text-zinc-950 shadow-lg shadow-amber-500/20 hover:bg-amber-400"
+                >
+                  <LogIn className="h-4 w-4" />
+                  Se connecter avec Google
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(true)}
+                  className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900 px-5 py-2.5 text-xs font-semibold text-zinc-300 hover:border-zinc-600"
+                >
+                  <Settings className="h-4 w-4" />
+                  Paramètres OAuth / Classeur
+                </button>
+              </div>
             </div>
-            <h2 className="mt-4 text-xl font-extrabold text-white">
-              Connectez votre classeur Google Sheets
-            </h2>
-            <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-              Connectez-vous avec Google OAuth pour charger vos joueurs, votre
-              banque d’exercices, votre préparation et votre historique réel
-              depuis le classeur{' '}
-              <code className="rounded bg-zinc-900 px-1.5 py-0.5 text-xs text-amber-300">
-                {syncStatus.spreadsheetId.slice(0, 14)}…
-              </code>
-              .
-            </p>
-            <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
-              <button
-                type="button"
-                onClick={() => void signInGoogle()}
-                className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl bg-amber-500 px-6 py-3 text-sm font-black text-zinc-950 shadow-lg shadow-amber-500/20 hover:bg-amber-400"
-              >
-                <LogIn className="h-4 w-4" />
-                Se connecter avec Google
-              </button>
-              <button
-                type="button"
-                onClick={() => setSettingsOpen(true)}
-                className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900 px-5 py-3 text-sm font-semibold text-zinc-200 hover:border-zinc-600"
-              >
-                <Settings className="h-4 w-4" />
-                Configurer Client ID
-              </button>
+
+            {/* Viewer Email + Password Login Card (Strict Read-Only) */}
+            <div className="flex flex-col justify-between rounded-3xl border border-sky-500/30 bg-zinc-950 p-6 sm:p-7">
+              <div>
+                <div className="flex items-center justify-between">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-sky-500/15 text-sky-400">
+                    <Eye className="h-6 w-6" />
+                  </div>
+                  <span className="rounded-full border border-sky-500/40 bg-sky-500/15 px-3 py-1 text-[11px] font-bold text-sky-300">
+                    Lecture seule
+                  </span>
+                </div>
+                <h2 className="mt-4 text-xl font-extrabold text-white">
+                  Accès Invité (E-mail)
+                </h2>
+                <p className="mt-1.5 text-sm leading-relaxed text-zinc-400">
+                  Connectez-vous avec votre adresse e-mail et mot de passe pour
+                  consulter l’effectif, les exercices, le mode Live et
+                  l’historique <strong>sans modifier le Google Sheets</strong>.
+                </p>
+
+                <form onSubmit={handleViewerLogin} className="mt-5 space-y-3">
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                      Adresse e-mail
+                    </label>
+                    <div className="relative">
+                      <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+                      <input
+                        type="email"
+                        required
+                        autoComplete="email"
+                        value={loginEmail}
+                        onChange={(e) => setLoginEmail(e.target.value)}
+                        placeholder="prenom@club.fr"
+                        className="w-full rounded-xl border border-zinc-800 bg-zinc-900 py-3 pl-10 pr-3.5 text-sm text-white placeholder-zinc-500 outline-none focus:border-sky-400"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                      Mot de passe
+                    </label>
+                    <div className="relative">
+                      <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+                      <input
+                        type="password"
+                        required
+                        autoComplete="current-password"
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="w-full rounded-xl border border-zinc-800 bg-zinc-900 py-3 pl-10 pr-3.5 text-sm text-white placeholder-zinc-500 outline-none focus:border-sky-400"
+                      />
+                    </div>
+                  </div>
+
+                  {loginError && (
+                    <div className="rounded-xl border border-red-500/40 bg-red-950/40 px-3.5 py-2.5 text-xs text-red-200">
+                      {loginError}
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={loginBusy}
+                    className="inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-sky-500 px-6 py-3 text-sm font-black text-zinc-950 shadow-lg shadow-sky-500/15 transition hover:bg-sky-400 disabled:opacity-50"
+                  >
+                    {loginBusy ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Connexion...
+                      </>
+                    ) : (
+                      <>
+                        <Eye className="h-4 w-4" />
+                        Connexion lecture seule
+                      </>
+                    )}
+                  </button>
+                </form>
+              </div>
             </div>
           </div>
         ) : (
