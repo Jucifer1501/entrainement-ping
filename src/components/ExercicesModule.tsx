@@ -8,7 +8,9 @@ import {
   Calendar,
   Clock,
   Edit3,
+  GitBranch,
   Lightbulb,
+  Merge,
   Play,
   Plus,
   Save,
@@ -20,15 +22,26 @@ import {
   X,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
-import { BasketBadge, PicotBadge } from '@/components/ui/Badges';
-import { generateSessionPlan } from '@/services/sessionGenerator';
+import {
+  BasketBadge,
+  GroupeBadge,
+  NiveauBadge,
+  PicotBadge,
+} from '@/components/ui/Badges';
+import {
+  flattenSlotsToPreparation,
+  generateSessionPlan,
+  groupPreparationIntoSlots,
+} from '@/services/sessionGenerator';
 import type {
   BasketSuitability,
   Exercise,
   ExerciseInput,
+  NiveauCible,
   PicotCompatibility,
   PreparationItem,
   SessionDurationPreset,
+  SessionSlot,
 } from '@/types';
 
 const BASKET_OPTIONS: BasketSuitability[] = ['Oui', 'Possible', 'Non adapté'];
@@ -37,6 +50,12 @@ const PICOT_OPTIONS: PicotCompatibility[] = [
   'Adapté',
   'À adapter',
   'Non adapté',
+];
+const NIVEAU_OPTIONS: NiveauCible[] = [
+  'Tous niveaux',
+  'Débutant',
+  'Intermédiaire',
+  'Confirmé',
 ];
 
 const PICOT_SORT_RANK: Record<PicotCompatibility, number> = {
@@ -79,6 +98,9 @@ function ExerciseModal({
     useState<PicotCompatibility>(
       initialExercise?.picotCompatibility ?? 'Adapté'
     );
+  const [niveauCible, setNiveauCible] = useState<NiveauCible>(
+    initialExercise?.niveauCible ?? 'Tous niveaux'
+  );
   const [saving, setSaving] = useState(false);
 
   const handleSave = async (e: React.FormEvent) => {
@@ -94,6 +116,7 @@ function ExerciseModal({
           description: description.trim(),
           basketSuitability,
           picotCompatibility,
+          niveauCible,
         },
         initialExercise
       );
@@ -188,7 +211,24 @@ function ExerciseModal({
             />
           </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div>
+              <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-zinc-400">
+                Niveau cible (col. I)
+              </label>
+              <select
+                value={niveauCible}
+                onChange={(e) => setNiveauCible(e.target.value as NiveauCible)}
+                className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm text-white outline-none focus:border-amber-500"
+              >
+                {NIVEAU_OPTIONS.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <div>
               <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-zinc-400">
                 Panier de balles
@@ -272,6 +312,7 @@ export function ExercicesModule() {
 
   const [search, setSearch] = useState('');
   const [selectedAxis, setSelectedAxis] = useState('ALL');
+  const [selectedNiveau, setSelectedNiveau] = useState<string>('ALL');
   const [selectedPicot, setSelectedPicot] = useState<string>('ALL');
   const [selectedBasket, setSelectedBasket] = useState<string>('ALL');
   const [hidePicotSpecific, setHidePicotSpecific] = useState(false);
@@ -280,14 +321,29 @@ export function ExercicesModule() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingExercise, setEditingExercise] = useState<Exercise | null>(null);
   const [savingPlan, setSavingPlan] = useState(false);
+  const [differentiateByLevel, setDifferentiateByLevel] = useState(true);
   const [sessionDate, setSessionDate] = useState(
     preparation[0]?.date ?? new Date().toISOString().slice(0, 10)
+  );
+
+  const slots = useMemo(
+    () => groupPreparationIntoSlots(preparation),
+    [preparation]
+  );
+
+  const totalPlanDuration = useMemo(
+    () => slots.reduce((sum, slot) => sum + slot.durationMin, 0),
+    [slots]
   );
 
   const filteredExercises = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = exerciseBank.exercises.filter((exo) => {
+      const exoNiveau = exo.niveauCible ?? 'Tous niveaux';
       if (selectedAxis !== 'ALL' && exo.axis !== selectedAxis) return false;
+      if (selectedNiveau !== 'ALL' && exoNiveau !== selectedNiveau) {
+        return false;
+      }
       if (selectedPicot !== 'ALL' && exo.picotCompatibility !== selectedPicot) {
         return false;
       }
@@ -307,7 +363,8 @@ export function ExercicesModule() {
         exo.id.toLowerCase().includes(q) ||
         exo.technicalFocus.toLowerCase().includes(q) ||
         exo.description.toLowerCase().includes(q) ||
-        exo.axis.toLowerCase().includes(q)
+        exo.axis.toLowerCase().includes(q) ||
+        exoNiveau.toLowerCase().includes(q)
       );
     });
 
@@ -318,7 +375,6 @@ export function ExercicesModule() {
       if (sortBy === 'most') {
         return b.nbRealises - a.nbRealises || a.id.localeCompare(b.id);
       }
-      // Smart sort: when picotActive, surface Spécifique Picot & Adapté first, then least practiced
       if (picotActive) {
         const rankDiff =
           PICOT_SORT_RANK[a.picotCompatibility] -
@@ -331,17 +387,13 @@ export function ExercicesModule() {
     exerciseBank.exercises,
     search,
     selectedAxis,
+    selectedNiveau,
     selectedPicot,
     selectedBasket,
     picotActive,
     hidePicotSpecific,
     sortBy,
   ]);
-
-  const totalPlanDuration = useMemo(
-    () => preparation.reduce((sum, item) => sum + item.durationMin, 0),
-    [preparation]
-  );
 
   const handleExerciseSubmit = async (
     input: ExerciseInput,
@@ -355,15 +407,17 @@ export function ExercicesModule() {
   };
 
   const addExerciseToPlan = (exo: Exercise) => {
+    const nextOrder = slots.length + 1;
     const nextItem: PreparationItem = {
-      localId: `prep-${exo.id}-${Date.now()}`,
+      localId: `prep-${exo.id}-${exo.rowIndex}-${Date.now()}`,
       date: sessionDate,
-      order: preparation.length + 1,
+      order: nextOrder,
       axis: exo.axis,
       exerciseName: exo.name,
       durationMin: 15,
       objectives: exo.technicalFocus || exo.description.slice(0, 120),
       exerciseId: exo.id,
+      groupeCible: 'Tous',
     };
     setPreparation((prev) => [...prev, nextItem]);
     pushToast('info', `"${exo.name}" ajouté à la trame.`);
@@ -374,27 +428,155 @@ export function ExercicesModule() {
       picotActive,
       includePicotSpecificWhenInactive: !hidePicotSpecific,
       preferBasket: oddMode === 'PANIER_BALLES',
+      differentiateByLevel,
       date: sessionDate,
     });
+    const generatedSlots = groupPreparationIntoSlots(generated);
     setPreparation(generated);
     pushToast(
       'success',
-      `Trame équilibrée de ${duration} min générée (${generated.length} blocs).`
+      `Trame ${differentiateByLevel ? 'multi-niveaux ' : ''}de ${duration} min générée (${generatedSlots.length} créneaux).`
     );
   };
 
-  const movePlanItem = (index: number, delta: -1 | 1) => {
-    const target = index + delta;
-    if (target < 0 || target >= preparation.length) return;
-    setPreparation((prev) => {
-      const copy = [...prev];
-      const current = copy[index];
-      const swapped = copy[target];
-      if (!current || !swapped) return prev;
-      copy[index] = swapped;
-      copy[target] = current;
-      return copy.map((item, i) => ({ ...item, order: i + 1 }));
-    });
+  const commitSlots = (nextSlots: SessionSlot[]) => {
+    setPreparation(flattenSlotsToPreparation(nextSlots));
+  };
+
+  const moveSlot = (slotIdx: number, delta: -1 | 1) => {
+    const target = slotIdx + delta;
+    if (target < 0 || target >= slots.length) return;
+    const copy = [...slots];
+    const current = copy[slotIdx];
+    const swapped = copy[target];
+    if (!current || !swapped) return;
+    copy[slotIdx] = swapped;
+    copy[target] = current;
+    commitSlots(copy);
+  };
+
+  const updateSlotDuration = (slotIdx: number, nextDuration: number) => {
+    const safe = Math.max(1, Math.min(120, nextDuration));
+    const nextSlots = slots.map((slot, i) =>
+      i === slotIdx ? { ...slot, durationMin: safe } : slot
+    );
+    commitSlots(nextSlots);
+  };
+
+  const removeSlot = (slotIdx: number) => {
+    commitSlots(slots.filter((_, i) => i !== slotIdx));
+  };
+
+  const splitSlotByLevel = (slotIdx: number) => {
+    const slot = slots[slotIdx];
+    const primary = slot?.items[0];
+    if (!slot || !primary) return;
+
+    // Suggest a relevant Groupe B (Débutant / Tous niveaux) exercise from the same Axis first
+    const sameAxisCandidate = exerciseBank.exercises.find(
+      (e) =>
+        e.id !== primary.exerciseId &&
+        e.axis === primary.axis &&
+        (e.niveauCible === 'Débutant' || e.niveauCible === 'Tous niveaux')
+    );
+    const anySameAxis = exerciseBank.exercises.find(
+      (e) => e.id !== primary.exerciseId && e.axis === primary.axis
+    );
+    const anyBeginner = exerciseBank.exercises.find(
+      (e) =>
+        e.id !== primary.exerciseId &&
+        (e.niveauCible === 'Débutant' || e.niveauCible === 'Tous niveaux')
+    );
+    const fallbackB =
+      sameAxisCandidate ?? anySameAxis ?? anyBeginner ?? exerciseBank.exercises[0];
+
+    const itemA: PreparationItem = {
+      ...primary,
+      groupeCible: 'Groupe A (Confirmés)',
+    };
+
+    const itemB: PreparationItem = fallbackB
+      ? {
+          localId: `prep-${fallbackB.id}-${fallbackB.rowIndex}-${Date.now()}-B`,
+          date: primary.date,
+          order: slot.order,
+          axis: fallbackB.axis,
+          exerciseName: fallbackB.name,
+          durationMin: slot.durationMin,
+          objectives:
+            fallbackB.technicalFocus || fallbackB.description.slice(0, 120),
+          exerciseId: fallbackB.id,
+          groupeCible: 'Groupe B (Débutants)',
+        }
+      : {
+          ...primary,
+          localId: `${primary.localId}-B-${Date.now()}`,
+          groupeCible: 'Groupe B (Débutants)',
+        };
+
+    const nextSlots = slots.map((s, idx) =>
+      idx === slotIdx
+        ? {
+            ...s,
+            items: [itemA, itemB],
+            isDifferentiated: true,
+            groupA: itemA,
+            groupB: itemB,
+          }
+        : s
+    );
+    commitSlots(nextSlots);
+    pushToast(
+      'info',
+      'Variante Groupe A / Groupe B créée sur ce créneau synchronisé.'
+    );
+  };
+
+  const mergeSlotToUnified = (slotIdx: number) => {
+    const slot = slots[slotIdx];
+    const primary = slot?.groupA ?? slot?.items[0];
+    if (!slot || !primary) return;
+
+    const unified: PreparationItem = {
+      ...primary,
+      groupeCible: 'Tous',
+    };
+    const nextSlots = slots.map((s, idx) =>
+      idx === slotIdx
+        ? {
+            ...s,
+            items: [unified],
+            isDifferentiated: false,
+            groupA: null,
+            groupB: null,
+          }
+        : s
+    );
+    commitSlots(nextSlots);
+  };
+
+  const replaceVariantExercise = (
+    localId: string,
+    selectedExerciseId: string
+  ) => {
+    const picked = exerciseBank.exercises.find(
+      (e) => `${e.id}::${e.rowIndex}` === selectedExerciseId
+    );
+    if (!picked) return;
+    setPreparation((prev) =>
+      prev.map((item) =>
+        item.localId === localId
+          ? {
+              ...item,
+              axis: picked.axis,
+              exerciseName: picked.name,
+              exerciseId: picked.id,
+              objectives:
+                picked.technicalFocus || picked.description.slice(0, 120),
+            }
+          : item
+      )
+    );
   };
 
   const updatePlanItem = (
@@ -408,23 +590,14 @@ export function ExercicesModule() {
     );
   };
 
-  const removePlanItem = (localId: string) => {
-    setPreparation((prev) =>
-      prev
-        .filter((item) => item.localId !== localId)
-        .map((item, i) => ({ ...item, order: i + 1 }))
-    );
-  };
-
   const handleSavePreparation = async () => {
     setSavingPlan(true);
     try {
-      const withDate = preparation.map((item, idx) => ({
+      const flattened = flattenSlotsToPreparation(slots).map((item) => ({
         ...item,
         date: sessionDate,
-        order: idx + 1,
       }));
-      await savePreparation(withDate);
+      await savePreparation(flattened);
     } finally {
       setSavingPlan(false);
     }
@@ -482,7 +655,8 @@ export function ExercicesModule() {
             <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
             <div>
               <p className="font-bold text-amber-300">
-                Mode Picot actif ({presentSpecialPlayers.map((p) => p.name).join(', ')})
+                Mode Picot actif (
+                {presentSpecialPlayers.map((p) => p.name).join(', ')})
               </p>
               <p className="mt-0.5 text-xs text-amber-200/80">
                 Les exercices <strong>Spécifique Picot</strong> et{' '}
@@ -531,7 +705,7 @@ export function ExercicesModule() {
           </div>
         )}
 
-        {/* Combinable filters */}
+        {/* Combinable filters (including Niveau cible) */}
         <div className="space-y-2.5 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-3.5">
           <div className="relative">
             <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
@@ -539,12 +713,12 @@ export function ExercicesModule() {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Filtrer par nom, thème, focus technique..."
+              placeholder="Filtrer par nom, thème, niveau, focus technique..."
               className="w-full rounded-xl border border-zinc-800 bg-zinc-950 py-2.5 pl-10 pr-4 text-sm text-white placeholder-zinc-500 outline-none focus:border-amber-500"
             />
           </div>
 
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-5">
             <select
               value={selectedAxis}
               onChange={(e) => setSelectedAxis(e.target.value)}
@@ -554,6 +728,19 @@ export function ExercicesModule() {
               {exerciseBank.axes.map((ax) => (
                 <option key={ax} value={ax}>
                   {ax}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={selectedNiveau}
+              onChange={(e) => setSelectedNiveau(e.target.value)}
+              className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-amber-500"
+            >
+              <option value="ALL">Niveau : Tous</option>
+              {NIVEAU_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n}
                 </option>
               ))}
             </select>
@@ -592,8 +779,8 @@ export function ExercicesModule() {
               className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-amber-500"
             >
               <option value="smart">Tri : Recommandé</option>
-              <option value="least">Nb réalisés ↑ (moins faits)</option>
-              <option value="most">Nb réalisés ↓ (plus faits)</option>
+              <option value="least">Nb réalisés ↑</option>
+              <option value="most">Nb réalisés ↓</option>
             </select>
           </div>
         </div>
@@ -608,12 +795,13 @@ export function ExercicesModule() {
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] font-mono text-zinc-400">
+                    <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400">
                       {exo.id}
                     </span>
                     <span className="truncate text-xs font-semibold text-amber-400">
                       {exo.axis}
                     </span>
+                    <NiveauBadge niveau={exo.niveauCible} />
                   </div>
                   <h3 className="mt-1 text-base font-bold text-white">
                     {exo.name}
@@ -675,7 +863,7 @@ export function ExercicesModule() {
         </div>
       </section>
 
-      {/* Right: Session Planner (Préparation) */}
+      {/* Right: Multi-Level Session Planner (Préparation) */}
       <section className="space-y-4 lg:col-span-5">
         <div className="rounded-2xl border border-zinc-800 bg-zinc-900/75 p-4 sm:p-5">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -685,12 +873,11 @@ export function ExercicesModule() {
                 Planificateur (Préparation)
               </h2>
               <p className="text-xs text-zinc-400">
-                Total :{' '}
+                Chrono salle :{' '}
                 <strong className="tabular-nums text-amber-400">
                   {totalPlanDuration} min
                 </strong>{' '}
-                ({preparation.length} exercice
-                {preparation.length > 1 ? 's' : ''})
+                ({slots.length} créneau{slots.length > 1 ? 'x' : ''})
               </p>
             </div>
 
@@ -705,12 +892,23 @@ export function ExercicesModule() {
             </div>
           </div>
 
-          {/* Automatic balanced session generator */}
+          {/* Automatic balanced session generator with multi-level toggle */}
           <div className="mt-4 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
-            <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-zinc-300">
-              <Wand2 className="h-3.5 w-3.5 text-amber-400" />
-              Générateur automatique équilibré (Axes + moins réalisés)
-            </p>
+            <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+              <p className="flex items-center gap-1.5 text-xs font-semibold text-zinc-300">
+                <Wand2 className="h-3.5 w-3.5 text-amber-400" />
+                Générateur équilibré
+              </p>
+              <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-semibold text-zinc-200">
+                <input
+                  type="checkbox"
+                  checked={differentiateByLevel}
+                  onChange={(e) => setDifferentiateByLevel(e.target.checked)}
+                  className="h-4 w-4 rounded border-zinc-700 accent-amber-500"
+                />
+                Différencier par niveau
+              </label>
+            </div>
             <div className="grid grid-cols-3 gap-2">
               {([60, 90, 120] as const).map((preset) => (
                 <button
@@ -725,34 +923,91 @@ export function ExercicesModule() {
             </div>
           </div>
 
-          {/* Planned blocks */}
-          <div className="mt-4 space-y-2.5">
-            {preparation.map((item, idx) => (
+          {/* Planned synchronized time slots */}
+          <div className="mt-4 space-y-3">
+            {slots.map((slot, slotIdx) => (
               <div
-                key={item.localId}
-                className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"
+                key={`slot-${slot.order}-${slot.items[0]?.localId ?? slotIdx}`}
+                className={`rounded-xl border p-3 ${
+                  slot.isDifferentiated
+                    ? 'border-amber-500/35 bg-zinc-950'
+                    : 'border-zinc-800 bg-zinc-950'
+                }`}
               >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-amber-500/20 text-xs font-bold tabular-nums text-amber-300">
-                        {idx + 1}
+                {/* Slot Header: Order + Duration + Actions */}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-amber-500/20 text-xs font-bold tabular-nums text-amber-300">
+                      {slotIdx + 1}
+                    </span>
+
+                    <div className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+                      <Clock className="ml-1 h-3.5 w-3.5 text-amber-400" />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateSlotDuration(slotIdx, slot.durationMin - 5)
+                        }
+                        className="h-6 w-6 rounded bg-zinc-800 text-[11px] font-bold text-white hover:bg-zinc-700"
+                      >
+                        -5
+                      </button>
+                      <input
+                        type="number"
+                        min={1}
+                        max={120}
+                        value={slot.durationMin}
+                        onChange={(e) =>
+                          updateSlotDuration(
+                            slotIdx,
+                            Number.parseInt(e.target.value, 10) || 1
+                          )
+                        }
+                        className="w-10 bg-transparent text-center text-xs font-bold tabular-nums text-white outline-none"
+                      />
+                      <span className="pr-1 text-[11px] text-zinc-400">
+                        min
                       </span>
-                      <span className="truncate text-[11px] font-semibold text-zinc-400">
-                        {item.axis}
-                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateSlotDuration(slotIdx, slot.durationMin + 5)
+                        }
+                        className="h-6 w-6 rounded bg-zinc-800 text-[11px] font-bold text-white hover:bg-zinc-700"
+                      >
+                        +5
+                      </button>
                     </div>
-                    <p className="mt-1 text-sm font-bold text-white">
-                      {item.exerciseName}
-                    </p>
                   </div>
 
-                  {/* Reorder & Remove */}
+                  {/* Reorder, Split/Merge & Delete */}
                   <div className="flex shrink-0 items-center gap-1">
+                    {!slot.isDifferentiated ? (
+                      <button
+                        type="button"
+                        onClick={() => splitSlotByLevel(slotIdx)}
+                        className="inline-flex h-8 items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2 text-[11px] font-bold text-sky-300 hover:bg-sky-500/20"
+                        title="Assigner un exercice différent au Groupe A et au Groupe B sur ce créneau"
+                      >
+                        <GitBranch className="h-3.5 w-3.5" />
+                        + Variante niveau
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => mergeSlotToUnified(slotIdx)}
+                        className="inline-flex h-8 items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-[11px] font-semibold text-zinc-300 hover:text-white"
+                        title="Revenir à un exercice commun (Tous)"
+                      >
+                        <Merge className="h-3.5 w-3.5" />
+                        Tous
+                      </button>
+                    )}
+
                     <button
                       type="button"
-                      disabled={idx === 0}
-                      onClick={() => movePlanItem(idx, -1)}
+                      disabled={slotIdx === 0}
+                      onClick={() => moveSlot(slotIdx, -1)}
                       className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-white disabled:opacity-30"
                       aria-label="Monter"
                     >
@@ -760,8 +1015,8 @@ export function ExercicesModule() {
                     </button>
                     <button
                       type="button"
-                      disabled={idx === preparation.length - 1}
-                      onClick={() => movePlanItem(idx, 1)}
+                      disabled={slotIdx === slots.length - 1}
+                      onClick={() => moveSlot(slotIdx, 1)}
                       className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-white disabled:opacity-30"
                       aria-label="Descendre"
                     >
@@ -769,75 +1024,99 @@ export function ExercicesModule() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => removePlanItem(item.localId)}
+                      onClick={() => removeSlot(slotIdx)}
                       className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-red-500/40 hover:text-red-400"
-                      aria-label="Supprimer"
+                      aria-label="Supprimer le créneau"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </div>
                 </div>
 
-                {/* Duration & Objectives edit */}
-                <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                  <div className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-1">
-                    <Clock className="ml-1 h-3.5 w-3.5 text-amber-400" />
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updatePlanItem(item.localId, {
-                          durationMin: Math.max(5, item.durationMin - 5),
-                        })
-                      }
-                      className="h-7 w-7 rounded bg-zinc-800 text-xs font-bold text-white hover:bg-zinc-700"
-                    >
-                      -5
-                    </button>
-                    <input
-                      type="number"
-                      min={1}
-                      max={120}
-                      value={item.durationMin}
-                      onChange={(e) =>
-                        updatePlanItem(item.localId, {
-                          durationMin: Math.max(
-                            1,
-                            Number.parseInt(e.target.value, 10) || 1
-                          ),
-                        })
-                      }
-                      className="w-11 bg-transparent text-center text-xs font-bold tabular-nums text-white outline-none"
-                    />
-                    <span className="pr-1 text-[11px] text-zinc-400">min</span>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updatePlanItem(item.localId, {
-                          durationMin: Math.min(120, item.durationMin + 5),
-                        })
-                      }
-                      className="h-7 w-7 rounded bg-zinc-800 text-xs font-bold text-white hover:bg-zinc-700"
-                    >
-                      +5
-                    </button>
-                  </div>
+                {/* Slot Body: Single 'Tous' OR Dual Groupe A / Groupe B */}
+                <div className="mt-2.5 space-y-2">
+                  {slot.items.map((item) => {
+                    const groupe = item.groupeCible ?? 'Tous';
+                    const isGroupA = groupe === 'Groupe A (Confirmés)';
+                    const isGroupB = groupe === 'Groupe B (Débutants)';
+                    const currentOptionVal = exerciseBank.exercises.find(
+                      (e) =>
+                        e.id === item.exerciseId && e.name === item.exerciseName
+                    );
 
-                  <input
-                    type="text"
-                    value={item.objectives}
-                    onChange={(e) =>
-                      updatePlanItem(item.localId, {
-                        objectives: e.target.value,
-                      })
-                    }
-                    placeholder="Objectifs & consignes..."
-                    className="min-w-[160px] flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 outline-none focus:border-amber-500"
-                  />
+                    return (
+                      <div
+                        key={item.localId}
+                        className={`rounded-lg border p-2.5 ${
+                          isGroupA
+                            ? 'border-amber-500/35 bg-amber-500/[0.06]'
+                            : isGroupB
+                              ? 'border-sky-500/35 bg-sky-500/[0.06]'
+                              : 'border-zinc-800/80 bg-zinc-900/50'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-1.5">
+                          <span className="truncate text-[11px] font-semibold text-zinc-400">
+                            {item.axis}
+                          </span>
+                          {slot.isDifferentiated && (
+                            <GroupeBadge groupe={groupe} />
+                          )}
+                        </div>
+
+                        {slot.isDifferentiated ? (
+                          <select
+                            value={
+                              currentOptionVal
+                                ? `${currentOptionVal.id}::${currentOptionVal.rowIndex}`
+                                : ''
+                            }
+                            onChange={(e) =>
+                              replaceVariantExercise(
+                                item.localId,
+                                e.target.value
+                              )
+                            }
+                            className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs font-bold text-white outline-none focus:border-amber-500"
+                          >
+                            {!currentOptionVal && (
+                              <option value="">{item.exerciseName}</option>
+                            )}
+                            {exerciseBank.exercises.map((exo) => (
+                              <option
+                                key={`${exo.id}-${exo.rowIndex}`}
+                                value={`${exo.id}::${exo.rowIndex}`}
+                              >
+                                [{exo.niveauCible ?? 'Tous niveaux'}]{' '}
+                                {exo.name} ({exo.axis})
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <p className="mt-1 text-sm font-bold text-white">
+                            {item.exerciseName}
+                          </p>
+                        )}
+
+                        <input
+                          type="text"
+                          value={item.objectives}
+                          onChange={(e) =>
+                            updatePlanItem(item.localId, {
+                              objectives: e.target.value,
+                            })
+                          }
+                          placeholder="Objectifs & consignes..."
+                          className="mt-2 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 outline-none focus:border-amber-500"
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             ))}
 
-            {preparation.length === 0 && (
+            {slots.length === 0 && (
               <div className="rounded-xl border border-dashed border-zinc-800 py-8 text-center text-sm text-zinc-500">
                 Cliquez sur « + Trame » ou utilisez le générateur 60 / 90 / 120
                 min.

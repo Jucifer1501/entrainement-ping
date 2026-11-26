@@ -124,6 +124,7 @@ export const SEED_EXERCISE_BANK: ExerciseBankData = {
       basketSuitability: 'Oui',
       picotCompatibility: 'Adapté',
       nbRealises: 4,
+      niveauCible: 'Intermédiaire',
     },
     {
       rowIndex: 8,
@@ -136,6 +137,7 @@ export const SEED_EXERCISE_BANK: ExerciseBankData = {
       basketSuitability: 'Possible',
       picotCompatibility: 'Adapté',
       nbRealises: 2,
+      niveauCible: 'Débutant',
     },
     {
       rowIndex: 10,
@@ -148,6 +150,7 @@ export const SEED_EXERCISE_BANK: ExerciseBankData = {
       basketSuitability: 'Non adapté',
       picotCompatibility: 'Adapté',
       nbRealises: 1,
+      niveauCible: 'Confirmé',
     },
     {
       rowIndex: 11,
@@ -160,6 +163,7 @@ export const SEED_EXERCISE_BANK: ExerciseBankData = {
       basketSuitability: 'Non adapté',
       picotCompatibility: 'À adapter',
       nbRealises: 3,
+      niveauCible: 'Débutant',
     },
     {
       rowIndex: 13,
@@ -172,6 +176,7 @@ export const SEED_EXERCISE_BANK: ExerciseBankData = {
       basketSuitability: 'Oui',
       picotCompatibility: 'À adapter',
       nbRealises: 2,
+      niveauCible: 'Débutant',
     },
     {
       rowIndex: 14,
@@ -184,6 +189,7 @@ export const SEED_EXERCISE_BANK: ExerciseBankData = {
       basketSuitability: 'Oui',
       picotCompatibility: 'Non adapté',
       nbRealises: 1,
+      niveauCible: 'Confirmé',
     },
     {
       rowIndex: 16,
@@ -196,6 +202,7 @@ export const SEED_EXERCISE_BANK: ExerciseBankData = {
       basketSuitability: 'Possible',
       picotCompatibility: 'Spécifique Picot',
       nbRealises: 1,
+      niveauCible: 'Confirmé',
     },
     {
       rowIndex: 17,
@@ -208,6 +215,7 @@ export const SEED_EXERCISE_BANK: ExerciseBankData = {
       basketSuitability: 'Non adapté',
       picotCompatibility: 'Spécifique Picot',
       nbRealises: 0,
+      niveauCible: 'Débutant',
     },
     {
       rowIndex: 19,
@@ -220,6 +228,7 @@ export const SEED_EXERCISE_BANK: ExerciseBankData = {
       basketSuitability: 'Non adapté',
       picotCompatibility: 'Adapté',
       nbRealises: 5,
+      niveauCible: 'Tous niveaux',
     },
     {
       rowIndex: 20,
@@ -232,6 +241,7 @@ export const SEED_EXERCISE_BANK: ExerciseBankData = {
       basketSuitability: 'Non adapté',
       picotCompatibility: 'Adapté',
       nbRealises: 3,
+      niveauCible: 'Tous niveaux',
     },
   ],
   picotMemos: [

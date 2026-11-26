@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { generateSessionPlan } from './sessionGenerator';
+import {
+  generateSessionPlan,
+  groupPreparationIntoSlots,
+} from './sessionGenerator';
 import { SEED_EXERCISE_BANK } from './seedData';
 import type { SessionDurationPreset } from '@/types';
 
@@ -84,5 +87,47 @@ describe('sessionGenerator service', () => {
     const total = plan.reduce((sum, item) => sum + item.durationMin, 0);
     expect(total).toBe(90);
     expect(plan).toHaveLength(2);
+  });
+
+  it('generates differentiated Groupe A / Groupe B blocks on technical axes while preserving exact synchronized duration', () => {
+    const plan = generateSessionPlan(SEED_EXERCISE_BANK.exercises, 90, {
+      picotActive: true,
+      differentiateByLevel: true,
+      date: '2026-11-26',
+    });
+
+    const slots = groupPreparationIntoSlots(plan);
+    const totalSlotMinutes = slots.reduce(
+      (sum, slot) => sum + slot.durationMin,
+      0
+    );
+    expect(totalSlotMinutes).toBe(90);
+
+    // Warmup (Axe 1) and Matchs stay unified ('Tous')
+    expect(slots[0]?.isDifferentiated).toBe(false);
+    expect(slots[0]?.items[0]?.groupeCible).toBe('Tous');
+    expect(slots[slots.length - 1]?.isDifferentiated).toBe(false);
+    expect(slots[slots.length - 1]?.items[0]?.groupeCible).toBe('Tous');
+
+    // Technical middle slots (Axes 2, 3, 4) have both Groupe A and Groupe B on the same order & duration
+    const differentiatedSlots = slots.filter((s) => s.isDifferentiated);
+    expect(differentiatedSlots.length).toBeGreaterThanOrEqual(2);
+
+    const byId = new Map(
+      SEED_EXERCISE_BANK.exercises.map((e) => [e.id, e])
+    );
+    for (const slot of differentiatedSlots) {
+      expect(slot.groupA).not.toBeNull();
+      expect(slot.groupB).not.toBeNull();
+      expect(slot.groupA?.order).toBe(slot.groupB?.order);
+      expect(slot.groupA?.durationMin).toBe(slot.groupB?.durationMin);
+      expect(slot.groupA?.exerciseId).not.toBe(slot.groupB?.exerciseId);
+
+      // Groupe A picks Confirmé exercise over Débutant when both exist on the axis
+      const exoA = byId.get(slot.groupA!.exerciseId);
+      const exoB = byId.get(slot.groupB!.exerciseId);
+      expect(exoA?.niveauCible).not.toBe('Débutant');
+      expect(exoB?.niveauCible).not.toBe('Confirmé');
+    }
   });
 });

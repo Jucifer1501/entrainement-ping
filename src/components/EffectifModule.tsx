@@ -252,9 +252,12 @@ export function EffectifModule() {
     setPairingMode,
     oddMode,
     setOddMode,
+    levelThreshold,
+    setLevelThreshold,
     pairings,
     regeneratePairings,
     swapPairingsPlayers,
+    toggleTableGroup,
     addPlayer,
     updatePlayer,
     isReadOnly,
@@ -621,6 +624,52 @@ export function EffectifModule() {
                 </button>
               </div>
             </div>
+            {/* FFTT Level Segmentation Slider */}
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="level-threshold-slider"
+                  className="text-xs font-semibold uppercase tracking-wide text-zinc-400"
+                >
+                  Seuil Groupe A / B
+                </label>
+                <span className="rounded-md bg-amber-500/15 px-2 py-0.5 text-xs font-bold tabular-nums text-amber-300">
+                  {levelThreshold} pts FFTT
+                </span>
+              </div>
+              <input
+                id="level-threshold-slider"
+                type="range"
+                min={500}
+                max={1800}
+                step={25}
+                value={levelThreshold}
+                onChange={(e) =>
+                  setLevelThreshold(Number.parseInt(e.target.value, 10) || 700)
+                }
+                className="mt-2 h-2 w-full cursor-pointer accent-amber-500"
+              />
+              <div className="mt-1.5 flex items-center justify-between text-[11px]">
+                <span className="font-semibold text-amber-300">
+                  Groupe A (≥ {levelThreshold}) :{' '}
+                  {
+                    pairings.tables.filter(
+                      (t) => t.groupLevel === 'Groupe A (Confirmés)'
+                    ).length
+                  }{' '}
+                  table(s)
+                </span>
+                <span className="font-semibold text-sky-300">
+                  Groupe B (&lt; {levelThreshold}) :{' '}
+                  {
+                    pairings.tables.filter(
+                      (t) => t.groupLevel === 'Groupe B (Débutants)'
+                    ).length
+                  }{' '}
+                  table(s)
+                </span>
+              </div>
+            </div>
           </div>
 
           {/* Swap helper banner */}
@@ -656,11 +705,25 @@ export function EffectifModule() {
                 key={table.tableNumber}
                 className="rounded-xl border border-zinc-800 bg-zinc-950 p-3.5"
               >
-                <div className="mb-2.5 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <span className="inline-flex h-6 items-center rounded-md bg-zinc-800 px-2 text-xs font-bold text-white">
                       Table {table.tableNumber}
                     </span>
+                    <button
+                      type="button"
+                      onClick={() => toggleTableGroup(table.tableNumber)}
+                      title="Cliquer pour basculer entre Groupe A et Groupe B"
+                      className={`inline-flex h-6 items-center rounded-md border px-2 text-[11px] font-bold transition active:scale-95 ${
+                        table.groupLevel === 'Groupe A (Confirmés)'
+                          ? 'border-amber-500/45 bg-amber-500/20 text-amber-300 hover:bg-amber-500/30'
+                          : 'border-sky-500/45 bg-sky-500/20 text-sky-300 hover:bg-sky-500/30'
+                      }`}
+                    >
+                      {table.groupLevel === 'Groupe A (Confirmés)'
+                        ? 'Groupe A (Confirmés)'
+                        : 'Groupe B (Débutants)'}
+                    </button>
                     {table.players.length === 3 && (
                       <span className="rounded-md bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
                         Trio

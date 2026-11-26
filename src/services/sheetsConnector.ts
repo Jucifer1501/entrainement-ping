@@ -4,6 +4,8 @@ import type {
   Exercise,
   ExerciseBankData,
   ExerciseInput,
+  GroupeCible,
+  NiveauCible,
   PicotCompatibility,
   PicotMemoItem,
   Player,
@@ -26,8 +28,8 @@ export const SHEET_NAMES = {
 
 export const SHEET_RANGES = {
   PLAYERS: `'${SHEET_NAMES.PLAYERS}'!B4:I100`,
-  EXERCISES: `'${SHEET_NAMES.EXERCISES}'!A6:H250`,
-  PREPARATION: `'${SHEET_NAMES.PREPARATION}'!B7:H35`,
+  EXERCISES: `'${SHEET_NAMES.EXERCISES}'!A6:I250`,
+  PREPARATION: `'${SHEET_NAMES.PREPARATION}'!B7:I35`,
   SESSIONS: `'${SHEET_NAMES.SESSIONS}'!B7:I500`,
 } as const;
 
@@ -111,6 +113,31 @@ function normalizePicotCompatibility(val: unknown): PicotCompatibility {
   if (s.includes('non')) return 'Non adapté';
   if (s.includes('à adapter') || s.includes('a adapter')) return 'À adapter';
   return 'Adapté';
+}
+
+export function normalizeNiveauCible(val: unknown): NiveauCible {
+  const s = String(val ?? '').trim().toLowerCase();
+  if (!s) return 'Tous niveaux';
+  if (s.includes('débutant') || s.includes('debutant')) return 'Débutant';
+  if (s.includes('intermédiaire') || s.includes('intermediaire')) {
+    return 'Intermédiaire';
+  }
+  if (s.includes('confirmé') || s.includes('confirme') || s.includes('avancé')) {
+    return 'Confirmé';
+  }
+  return 'Tous niveaux';
+}
+
+export function normalizeGroupeCible(val: unknown): GroupeCible {
+  const s = String(val ?? '').trim().toLowerCase();
+  if (!s) return 'Tous';
+  if (s.includes('groupe a') || s.includes('confirmé') || s.includes('confirme')) {
+    return 'Groupe A (Confirmés)';
+  }
+  if (s.includes('groupe b') || s.includes('débutant') || s.includes('debutant')) {
+    return 'Groupe B (Débutants)';
+  }
+  return 'Tous';
 }
 
 function isRowEmpty(row: unknown[] | undefined): boolean {
@@ -269,6 +296,7 @@ export function parseExerciseBankRows(rows: unknown[][]): ExerciseBankData {
       basketSuitability: normalizeBasket(row[5]),
       picotCompatibility: normalizePicotCompatibility(row[6]),
       nbRealises: parseNumber(row[7], 0),
+      niveauCible: normalizeNiveauCible(row[8]),
     });
   }
 
@@ -299,6 +327,7 @@ export function parsePreparationRows(rows: unknown[][]): PreparationItem[] {
       durationMin: parseNumber(row[4], 15),
       objectives: String(row[5] ?? '').trim(),
       exerciseId: String(row[6] ?? '').trim(),
+      groupeCible: normalizeGroupeCible(row[7]),
     });
   });
   return items;
@@ -648,7 +677,7 @@ export async function addExerciseToSheet(
     }),
   });
 
-  const targetRange = `'${SHEET_NAMES.EXERCISES}'!A${insertRow1Based}:H${insertRow1Based}`;
+  const targetRange = `'${SHEET_NAMES.EXERCISES}'!A${insertRow1Based}:I${insertRow1Based}`;
   const rowValues = [
     [
       newId,
@@ -659,6 +688,7 @@ export async function addExerciseToSheet(
       input.basketSuitability,
       input.picotCompatibility,
       0,
+      input.niveauCible ?? 'Tous niveaux',
     ],
   ];
 
@@ -684,7 +714,7 @@ export async function updateExerciseInSheet(
     throw new Error('Index de ligne invalide pour Banque Exo (< 6).');
   }
 
-  const targetRange = `'${SHEET_NAMES.EXERCISES}'!A${exercise.rowIndex}:H${exercise.rowIndex}`;
+  const targetRange = `'${SHEET_NAMES.EXERCISES}'!A${exercise.rowIndex}:I${exercise.rowIndex}`;
   const rowValues = [
     [
       exercise.id,
@@ -695,6 +725,7 @@ export async function updateExerciseInSheet(
       exercise.basketSuitability,
       exercise.picotCompatibility,
       exercise.nbRealises,
+      exercise.niveauCible ?? 'Tous niveaux',
     ],
   ];
 
@@ -710,7 +741,7 @@ export async function updateExerciseInSheet(
 }
 
 /**
- * Saves preparation plan strictly inside 'Préparation'!B7:H35.
+ * Saves preparation plan strictly inside 'Préparation'!B7:I35.
  * NEVER writes above row 7 (rows 2–4 hold formula KPIs).
  */
 export async function savePreparationToSheet(
@@ -718,7 +749,7 @@ export async function savePreparationToSheet(
 ): Promise<void> {
   if (items.length > 29) {
     throw new Error(
-      'Maximum 29 exercices dans Préparation (plage strictement bornée B7:H35).'
+      'Maximum 29 lignes dans Préparation (plage strictement bornée B7:I35).'
     );
   }
 
@@ -730,15 +761,16 @@ export async function savePreparationToSheet(
   if (items.length === 0) return;
 
   const endRow = 6 + items.length;
-  const targetRange = `'${SHEET_NAMES.PREPARATION}'!B7:H${endRow}`;
+  const targetRange = `'${SHEET_NAMES.PREPARATION}'!B7:I${endRow}`;
   const values = items.map((item, idx) => [
     item.date,
-    idx + 1,
+    item.order > 0 ? item.order : idx + 1,
     item.axis,
     item.exerciseName,
     item.durationMin,
     item.objectives,
     item.exerciseId,
+    item.groupeCible ?? 'Tous',
   ]);
 
   await sheetsFetch(
@@ -791,16 +823,30 @@ export async function closeSessionAtomic(
 
   const participantsLabel = payload.presentPlayerNames.join(', ');
   const seancesRange = `'${SHEET_NAMES.SESSIONS}'!B${firstFreeRow}:I${endRow}`;
-  const seancesValues = completedExercises.map((exo, idx) => [
-    payload.date,
-    idx + 1,
-    exo.axis,
-    exo.exerciseName,
-    exo.durationMin,
-    exo.details,
-    participantsLabel,
-    payload.sessionId,
-  ]);
+  const seancesValues = completedExercises.map((exo, idx) => {
+    const groupTag =
+      exo.groupeCible && exo.groupeCible !== 'Tous'
+        ? `[${exo.groupeCible}]`
+        : '';
+    const trimmedDetails = exo.details.trim();
+    const formattedDetails =
+      groupTag && !trimmedDetails.startsWith(groupTag)
+        ? trimmedDetails
+          ? `${groupTag} ${trimmedDetails}`
+          : groupTag
+        : trimmedDetails;
+
+    return [
+      payload.date,
+      exo.slotOrder ?? idx + 1,
+      exo.axis,
+      exo.exerciseName,
+      exo.durationMin,
+      formattedDetails,
+      participantsLabel,
+      payload.sessionId,
+    ];
+  });
 
   const batchData: Array<{
     range: string;
@@ -822,31 +868,30 @@ export async function closeSessionAtomic(
     }
   }
 
-  const exerciseRowDeltaMap = new Map<number, number>();
+  // Increment Nb réalisés (+1) for every distinct exercise played (including both Groupe A and Groupe B variants)
+  const distinctCompletedRows = new Set<number>();
   for (const exo of completedExercises) {
     let targetRow = exo.exerciseRowIndex;
     if (targetRow === null && exo.exerciseId) {
-      const matched = snapshot.exerciseBank.exercises.find(
-        (b) =>
-          b.id === exo.exerciseId &&
-          (!exo.exerciseName || b.name === exo.exerciseName)
-      ) ?? snapshot.exerciseBank.exercises.find((b) => b.id === exo.exerciseId);
+      const matched =
+        snapshot.exerciseBank.exercises.find(
+          (b) =>
+            b.id === exo.exerciseId &&
+            (!exo.exerciseName || b.name === exo.exerciseName)
+        ) ??
+        snapshot.exerciseBank.exercises.find((b) => b.id === exo.exerciseId);
       targetRow = matched?.rowIndex ?? null;
     }
     if (targetRow !== null && targetRow >= 6) {
-      exerciseRowDeltaMap.set(
-        targetRow,
-        (exerciseRowDeltaMap.get(targetRow) ?? 0) + 1
-      );
+      distinctCompletedRows.add(targetRow);
     }
   }
 
   for (const bankExo of snapshot.exerciseBank.exercises) {
-    const delta = exerciseRowDeltaMap.get(bankExo.rowIndex);
-    if (delta && bankExo.rowIndex >= 6) {
+    if (distinctCompletedRows.has(bankExo.rowIndex) && bankExo.rowIndex >= 6) {
       batchData.push({
         range: `'${SHEET_NAMES.EXERCISES}'!H${bankExo.rowIndex}`,
-        values: [[bankExo.nbRealises + delta]],
+        values: [[bankExo.nbRealises + 1]],
       });
     }
   }
@@ -864,3 +909,6 @@ export async function closeSessionAtomic(
     writtenRange: seancesRange,
   };
 }
+
+/** French alias for closeSessionAtomic */
+export const cloturerSeanceAtomique = closeSessionAtomic;

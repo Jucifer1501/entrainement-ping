@@ -13,6 +13,7 @@ import {
   Users,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
+import { GroupeBadge } from '@/components/ui/Badges';
 import type { SessionClosureExercise } from '@/types';
 
 export function ClotureModule() {
@@ -49,11 +50,16 @@ export function ClotureModule() {
   }, [presentPlayerIds]);
 
   useEffect(() => {
-    const mapped: SessionClosureExercise[] = preparation.map((p) => {
-      const bankMatch = exerciseBank.exercises.find(
-        (e) =>
-          (p.exerciseId && e.id === p.exerciseId) || e.name === p.exerciseName
-      );
+    const mapped: SessionClosureExercise[] = preparation.map((p, idx) => {
+      const bankMatch =
+        exerciseBank.exercises.find(
+          (e) =>
+            p.exerciseId && e.id === p.exerciseId && e.name === p.exerciseName
+        ) ??
+        exerciseBank.exercises.find(
+          (e) =>
+            (p.exerciseId && e.id === p.exerciseId) || e.name === p.exerciseName
+        );
       const isMarkedLive =
         liveCompletedLocalIds.length === 0 ||
         liveCompletedLocalIds.includes(p.localId);
@@ -65,6 +71,8 @@ export function ClotureModule() {
         durationMin: p.durationMin,
         details: p.objectives,
         completed: isMarkedLive,
+        groupeCible: p.groupeCible ?? 'Tous',
+        slotOrder: p.order > 0 ? p.order : idx + 1,
       };
     });
     setItems(mapped);
@@ -75,10 +83,30 @@ export function ClotureModule() {
     [items]
   );
 
-  const totalMinutes = useMemo(
-    () => completedItems.reduce((sum, i) => sum + i.durationMin, 0),
-    [completedItems]
-  );
+  // Deduplicate wall-clock duration when Groupe A & Groupe B share the same synchronized slot
+  const totalMinutes = useMemo(() => {
+    const seenSlots = new Map<number, number>();
+    completedItems.forEach((item, idx) => {
+      const slotKey = item.slotOrder ?? idx + 1;
+      const existing = seenSlots.get(slotKey) ?? 0;
+      if (item.durationMin > existing) {
+        seenSlots.set(slotKey, item.durationMin);
+      }
+    });
+    return Array.from(seenSlots.values()).reduce((sum, m) => sum + m, 0);
+  }, [completedItems]);
+
+  const distinctCompletedExerciseCount = useMemo(() => {
+    const keys = new Set<string>();
+    for (const item of completedItems) {
+      if (item.exerciseRowIndex !== null) {
+        keys.add(`row-${item.exerciseRowIndex}`);
+      } else if (item.exerciseId) {
+        keys.add(`id-${item.exerciseId}`);
+      }
+    }
+    return keys.size;
+  }, [completedItems]);
 
   const selectedPlayers = useMemo(() => {
     const set = new Set(selectedPlayerIds);
@@ -264,9 +292,14 @@ export function ClotureModule() {
                 </button>
 
                 <div className="min-w-0 flex-1">
-                  <p className="text-[11px] font-semibold text-amber-400">
-                    {item.axis}
-                  </p>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <p className="text-[11px] font-semibold text-amber-400">
+                      #{item.slotOrder ?? idx + 1} • {item.axis}
+                    </p>
+                    {item.groupeCible && item.groupeCible !== 'Tous' && (
+                      <GroupeBadge groupe={item.groupeCible} />
+                    )}
+                  </div>
                   <p className="text-sm font-bold text-white">
                     {item.exerciseName}
                   </p>
@@ -372,8 +405,8 @@ export function ClotureModule() {
           <li>
             3. Incrémentation <code className="text-emerald-300">+1</code> sur{' '}
             <code className="text-zinc-200">&apos;Banque Exo&apos;!H</code> pour{' '}
-            {completedItems.filter((i) => Boolean(i.exerciseId)).length}{' '}
-            exercice(s) référencé(s).
+            {distinctCompletedExerciseCount} exercice(s) distinct(s) réalisé(s)
+            (variantes Groupe A &amp; Groupe B incluses).
           </li>
         </ul>
 

@@ -10,6 +10,16 @@ export type PicotCompatibility =
   | 'À adapter'
   | 'Non adapté';
 
+export type NiveauCible =
+  | 'Tous niveaux'
+  | 'Débutant'
+  | 'Intermédiaire'
+  | 'Confirmé';
+
+export type TableGroupLevel = 'Groupe A (Confirmés)' | 'Groupe B (Débutants)';
+
+export type GroupeCible = 'Tous' | TableGroupLevel;
+
 export interface Player {
   /** 1-based row index in Google Sheets 'Profils joueurs' (>= 4) */
   rowIndex: number;
@@ -45,6 +55,8 @@ export interface Exercise {
   basketSuitability: BasketSuitability;
   picotCompatibility: PicotCompatibility;
   nbRealises: number;
+  /** Read from column I of 'Banque Exo' (defaults to 'Tous niveaux') */
+  niveauCible?: NiveauCible;
 }
 
 export interface ExerciseInput {
@@ -54,6 +66,7 @@ export interface ExerciseInput {
   description: string;
   basketSuitability: BasketSuitability;
   picotCompatibility: PicotCompatibility;
+  niveauCible?: NiveauCible;
 }
 
 export interface PicotMemoItem {
@@ -75,12 +88,26 @@ export interface ExerciseBankData {
 export interface PreparationItem {
   localId: string;
   date: string; // YYYY-MM-DD or DD/MM/YYYY
-  order: number; // N° (1..n)
+  order: number; // N° (1..n) — shared by Groupe A & Groupe B on the same timed slot
   axis: string;
   exerciseName: string;
   durationMin: number;
   objectives: string;
   exerciseId: string; // EXO-XXX or empty if custom
+  /** Read/written in column I of 'Préparation' ('Tous' by default) */
+  groupeCible?: GroupeCible;
+}
+
+/** Alias matching French domain terminology */
+export type BlocSeance = PreparationItem;
+
+export interface SessionSlot {
+  order: number;
+  durationMin: number;
+  items: PreparationItem[];
+  isDifferentiated: boolean;
+  groupA: PreparationItem | null;
+  groupB: PreparationItem | null;
 }
 
 export interface SessionLogRow {
@@ -104,6 +131,8 @@ export interface TableGroup {
   averagePoints: number;
   isBasket: boolean;
   isStyleOpposition: boolean;
+  groupLevel: TableGroupLevel;
+  manualGroupOverride?: boolean;
 }
 
 export interface PairingResult {
@@ -111,6 +140,7 @@ export interface PairingResult {
   basketPlayer: Player | null;
   mode: PairingMode;
   oddMode: OddMode;
+  levelThreshold: number;
 }
 
 export type SessionDurationPreset = 60 | 90 | 120;
@@ -123,6 +153,8 @@ export interface SessionClosureExercise {
   durationMin: number;
   details: string;
   completed: boolean;
+  groupeCible?: GroupeCible;
+  slotOrder?: number;
 }
 
 export interface SessionClosurePayload {

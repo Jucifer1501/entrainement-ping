@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   computeNextCode,
   findFirstFreeRow,
+  normalizeGroupeCible,
+  normalizeNiveauCible,
   normalizeSheetDate,
   parseExerciseBankRows,
   parsePlayersRows,
+  parsePreparationRows,
   parseSessionRows,
 } from './sheetsConnector';
 
@@ -102,5 +105,30 @@ describe('sheetsConnector parsers & range helpers', () => {
       ['', '', '', '', '', '', 0, 'Oui'],
     ];
     expect(findFirstFreeRow(rowsWithPreFilledFormulas, 4, [0, 1])).toBe(5);
+  });
+
+  it('parses niveauCible from Banque Exo col I and groupeCible from Préparation col I with safe defaults', () => {
+    const bank = parseExerciseBankRows([
+      ['AXE 2 : Service & Remise'],
+      ['EXO-010', 'AXE 2 : Service & Remise', 'Service court', 'Effet', 'Desc', 'Non adapté', 'Adapté', '2', 'Confirmé'],
+      ['EXO-011', 'AXE 2 : Service & Remise', 'Service simple', 'Placement', 'Desc', 'Oui', 'Adapté', '1'], // empty col I -> Tous niveaux
+    ]);
+    expect(bank.exercises[0]?.niveauCible).toBe('Confirmé');
+    expect(bank.exercises[1]?.niveauCible).toBe('Tous niveaux');
+    expect(normalizeNiveauCible('Débutant')).toBe('Débutant');
+    expect(normalizeNiveauCible('')).toBe('Tous niveaux');
+
+    const prep = parsePreparationRows([
+      ['26/11/2026', 1, 'AXE 1', 'Échauffement', 15, 'Gammes', 'EXO-001'], // empty col I -> Tous
+      ['26/11/2026', 2, 'AXE 2', 'Service court', 20, 'Effet', 'EXO-010', 'Groupe A (Confirmés)'],
+      ['26/11/2026', 2, 'AXE 2', 'Service simple', 20, 'Placement', 'EXO-011', 'Groupe B (Débutants)'],
+    ]);
+    expect(prep).toHaveLength(3);
+    expect(prep[0]?.groupeCible).toBe('Tous');
+    expect(prep[1]?.groupeCible).toBe('Groupe A (Confirmés)');
+    expect(prep[1]?.order).toBe(2);
+    expect(prep[2]?.groupeCible).toBe('Groupe B (Débutants)');
+    expect(prep[2]?.order).toBe(2);
+    expect(normalizeGroupeCible('Groupe B')).toBe('Groupe B (Débutants)');
   });
 });

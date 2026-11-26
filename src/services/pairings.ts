@@ -5,7 +5,10 @@ import type {
   Player,
   RubberType,
   TableGroup,
+  TableGroupLevel,
 } from '@/types';
+
+export const DEFAULT_LEVEL_THRESHOLD = 700;
 
 const SPECIAL_RUBBERS: ReadonlySet<RubberType> = new Set([
   'Picot long',
@@ -32,6 +35,15 @@ export function computeAveragePoints(players: readonly Player[]): number {
   return Math.round(total / players.length);
 }
 
+export function classifyTableLevel(
+  averagePoints: number,
+  levelThreshold = DEFAULT_LEVEL_THRESHOLD
+): TableGroupLevel {
+  return averagePoints >= levelThreshold
+    ? 'Groupe A (Confirmés)'
+    : 'Groupe B (Débutants)';
+}
+
 export function isTableStyleOpposition(players: readonly Player[]): boolean {
   const hasSpecial = players.some(hasSpecialRubber);
   const hasBs = players.some(isBsOpponent);
@@ -47,19 +59,24 @@ function sortByPointsDesc(players: readonly Player[]): Player[] {
   });
 }
 
-function buildHomogeneousPairs(sortedDesc: readonly Player[]): TableGroup[] {
+function buildHomogeneousPairs(
+  sortedDesc: readonly Player[],
+  levelThreshold: number
+): TableGroup[] {
   const groups: TableGroup[] = [];
   for (let i = 0; i + 1 < sortedDesc.length; i += 2) {
     const p1 = sortedDesc[i];
     const p2 = sortedDesc[i + 1];
     if (p1 && p2) {
       const pair = [p1, p2];
+      const averagePoints = computeAveragePoints(pair);
       groups.push({
         tableNumber: groups.length + 1,
         players: pair,
-        averagePoints: computeAveragePoints(pair),
+        averagePoints,
         isBasket: false,
         isStyleOpposition: isTableStyleOpposition(pair),
+        groupLevel: classifyTableLevel(averagePoints, levelThreshold),
       });
     }
   }
@@ -68,7 +85,8 @@ function buildHomogeneousPairs(sortedDesc: readonly Player[]): TableGroup[] {
 
 function attachMedianToClosestTable(
   tables: TableGroup[],
-  medianPlayer: Player
+  medianPlayer: Player,
+  levelThreshold: number
 ): TableGroup[] {
   if (tables.length === 0) {
     return [
@@ -78,6 +96,7 @@ function attachMedianToClosestTable(
         averagePoints: medianPlayer.pointsFftt,
         isBasket: false,
         isStyleOpposition: false,
+        groupLevel: classifyTableLevel(medianPlayer.pointsFftt, levelThreshold),
       },
     ];
   }
@@ -102,35 +121,50 @@ function attachMedianToClosestTable(
   return tables.map((table, idx) => {
     if (idx !== bestIndex) return table;
     const updatedPlayers = sortByPointsDesc([...table.players, medianPlayer]);
+    const averagePoints = computeAveragePoints(updatedPlayers);
     return {
       ...table,
       players: updatedPlayers,
-      averagePoints: computeAveragePoints(updatedPlayers),
+      averagePoints,
       isStyleOpposition: isTableStyleOpposition(updatedPlayers),
+      groupLevel: classifyTableLevel(averagePoints, levelThreshold),
     };
   });
 }
 
-function renumberTables(tables: TableGroup[]): TableGroup[] {
+function renumberTables(
+  tables: TableGroup[],
+  levelThreshold: number
+): TableGroup[] {
   return [...tables]
     .sort((a, b) => b.averagePoints - a.averagePoints)
     .map((table, index) => ({
       ...table,
       tableNumber: index + 1,
+      groupLevel: table.manualGroupOverride
+        ? table.groupLevel
+        : classifyTableLevel(table.averagePoints, levelThreshold),
     }));
 }
 
 /**
- * Generates table pairings according to mode (HOMOGENE | OPPOSITION_STYLES)
- * and odd player handling (GROUPE_3 | PANIER_BALLES).
+ * Generates table pairings according to mode (HOMOGENE | OPPOSITION_STYLES),
+ * odd player handling (GROUPE_3 | PANIER_BALLES), and FFTT level threshold (default 700 pts).
  */
 export function generatePairings(
   presentPlayers: readonly Player[],
   mode: PairingMode,
-  oddMode: OddMode
+  oddMode: OddMode,
+  levelThreshold = DEFAULT_LEVEL_THRESHOLD
 ): PairingResult {
   if (presentPlayers.length === 0) {
-    return { tables: [], basketPlayer: null, mode, oddMode };
+    return {
+      tables: [],
+      basketPlayer: null,
+      mode,
+      oddMode,
+      levelThreshold,
+    };
   }
 
   if (presentPlayers.length === 1) {
@@ -141,6 +175,7 @@ export function generatePairings(
         basketPlayer: onlyPlayer,
         mode,
         oddMode,
+        levelThreshold,
       };
     }
     return {
@@ -151,11 +186,13 @@ export function generatePairings(
           averagePoints: onlyPlayer.pointsFftt,
           isBasket: false,
           isStyleOpposition: false,
+          groupLevel: classifyTableLevel(onlyPlayer.pointsFftt, levelThreshold),
         },
       ],
       basketPlayer: null,
       mode,
       oddMode,
+      levelThreshold,
     };
   }
 
@@ -170,27 +207,27 @@ export function generatePairings(
       pool = sorted.filter((_, idx) => idx !== medianIdx);
     }
 
-    let tables = buildHomogeneousPairs(pool);
+    let tables = buildHomogeneousPairs(pool, levelThreshold);
     let basketPlayer: Player | null = null;
 
     if (oddPlayer) {
       if (oddMode === 'PANIER_BALLES') {
         basketPlayer = oddPlayer;
       } else {
-        tables = attachMedianToClosestTable(tables, oddPlayer);
+        tables = attachMedianToClosestTable(tables, oddPlayer, levelThreshold);
       }
     }
 
     return {
-      tables: renumberTables(tables),
+      tables: renumberTables(tables, levelThreshold),
       basketPlayer,
       mode,
       oddMode,
+      levelThreshold,
     };
   }
 
   // Mode 2: OPPOSITION_STYLES
-  // Step 1: Match players with Picot long / Anti-top against closest-rated BS players
   const sortedAll = sortByPointsDesc(presentPlayers);
   const specialPool = sortedAll.filter(hasSpecialRubber);
   const availableBs = sortedAll.filter(isBsOpponent);
@@ -216,17 +253,19 @@ export function generatePairings(
       usedIds.add(special.id);
       usedIds.add(opponent.id);
       const pair = sortByPointsDesc([special, opponent]);
+      const averagePoints = computeAveragePoints(pair);
       tables.push({
         tableNumber: tables.length + 1,
         players: pair,
-        averagePoints: computeAveragePoints(pair),
+        averagePoints,
         isBasket: false,
         isStyleOpposition: true,
+        groupLevel: classifyTableLevel(averagePoints, levelThreshold),
       });
     }
   }
 
-  // Step 2: Pair remaining players homogeneously
+  // Pair remaining players homogeneously
   const remaining = sortedAll.filter((p) => !usedIds.has(p.id));
   let oddPlayer: Player | null = null;
   let remainingEven = remaining;
@@ -237,28 +276,72 @@ export function generatePairings(
     remainingEven = remaining.filter((_, idx) => idx !== medianIdx);
   }
 
-  tables = [...tables, ...buildHomogeneousPairs(remainingEven)];
+  tables = [...tables, ...buildHomogeneousPairs(remainingEven, levelThreshold)];
 
   let basketPlayer: Player | null = null;
   if (oddPlayer) {
     if (oddMode === 'PANIER_BALLES') {
       basketPlayer = oddPlayer;
     } else {
-      tables = attachMedianToClosestTable(tables, oddPlayer);
+      tables = attachMedianToClosestTable(tables, oddPlayer, levelThreshold);
     }
   }
 
   return {
-    tables: renumberTables(tables),
+    tables: renumberTables(tables, levelThreshold),
     basketPlayer,
     mode,
     oddMode,
+    levelThreshold,
+  };
+}
+
+/**
+ * Re-classifies all tables when the FFTT level threshold slider changes
+ * without losing manual player swaps.
+ */
+export function applyLevelThresholdToPairings(
+  result: PairingResult,
+  levelThreshold: number
+): PairingResult {
+  return {
+    ...result,
+    levelThreshold,
+    tables: result.tables.map((table) => ({
+      ...table,
+      groupLevel: classifyTableLevel(table.averagePoints, levelThreshold),
+      manualGroupOverride: false,
+    })),
+  };
+}
+
+/**
+ * Manually toggles a single table between Groupe A (Confirmés) and Groupe B (Débutants).
+ */
+export function toggleTableGroupLevel(
+  result: PairingResult,
+  tableNumber: number
+): PairingResult {
+  return {
+    ...result,
+    tables: result.tables.map((table) => {
+      if (table.tableNumber !== tableNumber) return table;
+      const nextLevel: TableGroupLevel =
+        table.groupLevel === 'Groupe A (Confirmés)'
+          ? 'Groupe B (Débutants)'
+          : 'Groupe A (Confirmés)';
+      return {
+        ...table,
+        groupLevel: nextLevel,
+        manualGroupOverride: true,
+      };
+    }),
   };
 }
 
 /**
  * Swaps two players anywhere in the pairing result (between tables, within a table,
- * or between a table and the Panier de balles slot).
+ * or between a table and the Panier de balles slot) and recalculates averages & group levels.
  */
 export function swapPlayersInPairings(
   result: PairingResult,
@@ -315,11 +398,18 @@ export function swapPlayersInPairings(
   placeAt(foundA, foundB.player);
   placeAt(foundB, foundA.player);
 
-  const recalculatedTables = nextTables.map((table) => ({
-    ...table,
-    averagePoints: computeAveragePoints(table.players),
-    isStyleOpposition: isTableStyleOpposition(table.players),
-  }));
+  const threshold = result.levelThreshold ?? DEFAULT_LEVEL_THRESHOLD;
+  const recalculatedTables = nextTables.map((table) => {
+    const averagePoints = computeAveragePoints(table.players);
+    return {
+      ...table,
+      averagePoints,
+      isStyleOpposition: isTableStyleOpposition(table.players),
+      groupLevel: table.manualGroupOverride
+        ? table.groupLevel
+        : classifyTableLevel(averagePoints, threshold),
+    };
+  });
 
   return {
     ...result,

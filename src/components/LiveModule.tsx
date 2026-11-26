@@ -21,14 +21,141 @@ import {
 import { useApp } from '@/context/AppContext';
 import { useWakeLock } from '@/hooks/useWakeLock';
 import { useAudioAlert } from '@/hooks/useAudioAlert';
-import { PicotBadge, RubberBadge } from '@/components/ui/Badges';
-import type { Player } from '@/types';
+import {
+  NiveauBadge,
+  PicotBadge,
+  RubberBadge,
+} from '@/components/ui/Badges';
+import { groupPreparationIntoSlots } from '@/services/sessionGenerator';
+import type { Exercise, Player, PreparationItem } from '@/types';
 
 function formatTimer(totalSeconds: number): string {
   const safe = Math.max(0, Math.floor(totalSeconds));
   const mins = Math.floor(safe / 60);
   const secs = safe % 60;
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function formatTableNumbers(nums: number[]): string {
+  if (nums.length === 0) return 'Aucune table';
+  if (nums.length === 1) return `Table ${nums[0]}`;
+  return `Tables ${nums.join(', ')}`;
+}
+
+interface LiveExerciseCardProps {
+  item: PreparationItem;
+  bankExercise: Exercise | null;
+  groupHeader?: string;
+  accent: 'default' | 'groupA' | 'groupB';
+  compact?: boolean;
+}
+
+function LiveExerciseCard({
+  item,
+  bankExercise,
+  groupHeader,
+  accent,
+  compact = false,
+}: LiveExerciseCardProps) {
+  const instructionLines = useMemo(() => {
+    const raw = bankExercise?.description || item.objectives || '';
+    return raw
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }, [bankExercise?.description, item.objectives]);
+
+  const borderClass =
+    accent === 'groupA'
+      ? 'border-amber-500/50 bg-zinc-950'
+      : accent === 'groupB'
+        ? 'border-sky-500/50 bg-zinc-950'
+        : 'border-zinc-800 bg-zinc-950';
+
+  const headerBadgeClass =
+    accent === 'groupA'
+      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+      : 'bg-sky-500/20 text-sky-300 border-sky-500/40';
+
+  const stepBulletClass =
+    accent === 'groupB'
+      ? 'bg-sky-500/20 text-sky-300'
+      : 'bg-amber-500/20 text-amber-300';
+
+  return (
+    <div
+      className={`rounded-3xl border ${borderClass} ${compact ? 'p-4 sm:p-5' : 'p-5 sm:p-6'}`}
+    >
+      {groupHeader && (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <span
+            className={`inline-flex items-center rounded-xl border px-3 py-1 text-xs font-extrabold uppercase tracking-wide ${headerBadgeClass}`}
+          >
+            {groupHeader}
+          </span>
+          <span className="truncate text-[11px] font-semibold text-zinc-400">
+            {item.axis}
+          </span>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <h2
+          className={`font-extrabold leading-tight text-white ${
+            compact ? 'text-xl sm:text-2xl' : 'text-2xl sm:text-3xl'
+          }`}
+        >
+          {item.exerciseName}
+        </h2>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {bankExercise?.niveauCible && (
+            <NiveauBadge niveau={bankExercise.niveauCible} />
+          )}
+          {bankExercise && (
+            <PicotBadge compatibility={bankExercise.picotCompatibility} />
+          )}
+        </div>
+      </div>
+
+      {bankExercise?.technicalFocus && (
+        <p
+          className={`mt-2 inline-block rounded-lg px-3 py-1 text-sm font-semibold ${
+            accent === 'groupB'
+              ? 'bg-sky-500/15 text-sky-300'
+              : 'bg-amber-500/15 text-amber-300'
+          }`}
+        >
+          Focus : {bankExercise.technicalFocus}
+        </p>
+      )}
+
+      {item.objectives && item.objectives !== bankExercise?.description && (
+        <p className="mt-2.5 text-sm font-medium text-zinc-300">
+          Objectif : {item.objectives}
+        </p>
+      )}
+
+      {instructionLines.length > 0 && (
+        <ul className="mt-3.5 space-y-2">
+          {instructionLines.map((line, i) => (
+            <li
+              key={i}
+              className={`flex items-start gap-3 rounded-xl bg-zinc-900/90 px-3.5 py-2.5 leading-snug text-zinc-100 ${
+                compact ? 'text-sm sm:text-base' : 'text-base'
+              }`}
+            >
+              <span
+                className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold ${stepBulletClass}`}
+              >
+                {i + 1}
+              </span>
+              <span>{line.replace(/^\d+[.)]\s*/, '')}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 export function LiveModule() {
@@ -38,14 +165,20 @@ export function LiveModule() {
     picotActive,
     pairings,
     swapPairingsPlayers,
+    toggleTableGroup,
     liveCompletedLocalIds,
     markLiveExerciseCompleted,
     setActiveTab,
   } = useApp();
 
+  const slots = useMemo(
+    () => groupPreparationIntoSlots(preparation),
+    [preparation]
+  );
+
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [remainingSeconds, setRemainingSeconds] = useState<number>(() =>
-    (preparation[0]?.durationMin ?? 15) * 60
+  const [remainingSeconds, setRemainingSeconds] = useState<number>(
+    () => (slots[0]?.durationMin ?? 15) * 60
   );
   const [isRunning, setIsRunning] = useState(false);
   const [finishedAlerted, setFinishedAlerted] = useState(false);
@@ -63,25 +196,46 @@ export function LiveModule() {
   // Synthesized Web Audio double beep + full-screen visual flash
   const audioAlert = useAudioAlert();
 
-  // Keep index in bounds if preparation shrinks
-  const safeIndex = Math.min(currentIndex, Math.max(0, preparation.length - 1));
-  const currentItem = preparation[safeIndex] ?? null;
+  const safeIndex = Math.min(currentIndex, Math.max(0, slots.length - 1));
+  const currentSlot = slots[safeIndex] ?? null;
 
-  const matchedBankExercise = useMemo(() => {
-    if (!currentItem) return null;
-    if (currentItem.exerciseId) {
-      const byId = exerciseBank.exercises.find(
-        (e) => e.id === currentItem.exerciseId
+  const findBankExercise = useCallback(
+    (item: PreparationItem | null): Exercise | null => {
+      if (!item) return null;
+      if (item.exerciseId) {
+        const byIdAndName = exerciseBank.exercises.find(
+          (e) => e.id === item.exerciseId && e.name === item.exerciseName
+        );
+        if (byIdAndName) return byIdAndName;
+        const byId = exerciseBank.exercises.find(
+          (e) => e.id === item.exerciseId
+        );
+        if (byId) return byId;
+      }
+      return (
+        exerciseBank.exercises.find((e) => e.name === item.exerciseName) ?? null
       );
-      if (byId) return byId;
-    }
-    return (
-      exerciseBank.exercises.find((e) => e.name === currentItem.exerciseName) ??
-      null
-    );
-  }, [currentItem, exerciseBank.exercises]);
+    },
+    [exerciseBank.exercises]
+  );
 
-  const totalBlockSeconds = (currentItem?.durationMin ?? 15) * 60;
+  const groupATableNumbers = useMemo(
+    () =>
+      pairings.tables
+        .filter((t) => t.groupLevel === 'Groupe A (Confirmés)')
+        .map((t) => t.tableNumber),
+    [pairings.tables]
+  );
+
+  const groupBTableNumbers = useMemo(
+    () =>
+      pairings.tables
+        .filter((t) => t.groupLevel === 'Groupe B (Débutants)')
+        .map((t) => t.tableNumber),
+    [pairings.tables]
+  );
+
+  const totalBlockSeconds = (currentSlot?.durationMin ?? 15) * 60;
   const progressPct =
     totalBlockSeconds > 0
       ? Math.min(
@@ -92,6 +246,16 @@ export function LiveModule() {
           )
         )
       : 0;
+
+  const markSlotCompleted = useCallback(
+    (completed: boolean) => {
+      if (!currentSlot) return;
+      currentSlot.items.forEach((item) => {
+        markLiveExerciseCompleted(item.localId, completed);
+      });
+    },
+    [currentSlot, markLiveExerciseCompleted]
+  );
 
   // Accurate countdown tick
   useEffect(() => {
@@ -113,34 +277,26 @@ export function LiveModule() {
         endTimeRef.current = null;
         setFinishedAlerted(true);
         audioAlert.triggerTimerEndAlert();
-        if (currentItem) {
-          markLiveExerciseCompleted(currentItem.localId, true);
-        }
+        markSlotCompleted(true);
       } else {
         setRemainingSeconds(diffSec);
       }
     }, 250);
 
     return () => window.clearInterval(interval);
-  }, [
-    isRunning,
-    remainingSeconds,
-    audioAlert,
-    currentItem,
-    markLiveExerciseCompleted,
-  ]);
+  }, [isRunning, remainingSeconds, audioAlert, markSlotCompleted]);
 
-  const switchToExercise = useCallback(
+  const switchToSlot = useCallback(
     (nextIdx: number) => {
-      const clamped = Math.max(0, Math.min(preparation.length - 1, nextIdx));
-      const target = preparation[clamped];
+      const clamped = Math.max(0, Math.min(slots.length - 1, nextIdx));
+      const target = slots[clamped];
       setCurrentIndex(clamped);
       setIsRunning(false);
       endTimeRef.current = null;
       setFinishedAlerted(false);
       setRemainingSeconds((target?.durationMin ?? 15) * 60);
     },
-    [preparation]
+    [slots]
   );
 
   const handleToggleRun = () => {
@@ -154,8 +310,8 @@ export function LiveModule() {
       return;
     }
 
-    if (remainingSeconds <= 0 && currentItem) {
-      const resetSec = currentItem.durationMin * 60;
+    if (remainingSeconds <= 0 && currentSlot) {
+      const resetSec = currentSlot.durationMin * 60;
       setRemainingSeconds(resetSec);
       endTimeRef.current = Date.now() + resetSec * 1000;
       setFinishedAlerted(false);
@@ -172,7 +328,7 @@ export function LiveModule() {
     setIsRunning(false);
     endTimeRef.current = null;
     setFinishedAlerted(false);
-    setRemainingSeconds((currentItem?.durationMin ?? 15) * 60);
+    setRemainingSeconds((currentSlot?.durationMin ?? 15) * 60);
   };
 
   const handleAddOneMinute = () => {
@@ -199,16 +355,7 @@ export function LiveModule() {
     setSelectedSwapPlayer(null);
   };
 
-  const instructionLines = useMemo(() => {
-    const raw =
-      matchedBankExercise?.description || currentItem?.objectives || '';
-    return raw
-      .split(/\n+/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-  }, [matchedBankExercise?.description, currentItem?.objectives]);
-
-  if (preparation.length === 0 || !currentItem) {
+  if (slots.length === 0 || !currentSlot) {
     return (
       <div className="mx-auto max-w-xl rounded-3xl border border-zinc-800 bg-obsidian p-8 text-center">
         <p className="text-lg font-bold text-white">
@@ -229,7 +376,12 @@ export function LiveModule() {
     );
   }
 
-  const isCompleted = liveCompletedLocalIds.includes(currentItem.localId);
+  const isCompleted = currentSlot.items.every((item) =>
+    liveCompletedLocalIds.includes(item.localId)
+  );
+  const primaryAxisLabel = currentSlot.isDifferentiated
+    ? 'CRÉNEAU MULTI-NIVEAUX (CHRONO SYNCHRONISÉ)'
+    : currentSlot.items[0]?.axis ?? '';
 
   return (
     <div className="relative mx-auto flex min-h-[calc(100dvh-11rem)] max-w-3xl flex-col justify-between pb-44 sm:pb-48">
@@ -246,13 +398,16 @@ export function LiveModule() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <span className="rounded-full bg-amber-500/20 px-3 py-1 text-xs font-extrabold tabular-nums text-amber-300">
-              EXO {safeIndex + 1} / {preparation.length}
+              BLOC {safeIndex + 1} / {slots.length}
             </span>
+            {currentSlot.isDifferentiated && (
+              <span className="rounded-full border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-[11px] font-bold text-sky-300">
+                Groupes A / B
+              </span>
+            )}
             <button
               type="button"
-              onClick={() =>
-                markLiveExerciseCompleted(currentItem.localId, !isCompleted)
-              }
+              onClick={() => markSlotCompleted(!isCompleted)}
               className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-semibold transition ${
                 isCompleted
                   ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-300'
@@ -283,7 +438,7 @@ export function LiveModule() {
           </div>
         </div>
 
-        {/* Giant Countdown Panel */}
+        {/* Giant Single Synchronized Countdown Panel */}
         <div
           className={`rounded-3xl border p-5 text-center transition sm:p-7 ${
             remainingSeconds === 0
@@ -293,8 +448,8 @@ export function LiveModule() {
                 : 'border-zinc-800 bg-zinc-950'
           }`}
         >
-          <p className="text-xs font-bold uppercase tracking-[0.2em] text-amber-400">
-            {currentItem.axis}
+          <p className="text-xs font-bold uppercase tracking-[0.18em] text-amber-400">
+            {primaryAxisLabel}
           </p>
 
           <div
@@ -319,54 +474,49 @@ export function LiveModule() {
 
           {finishedAlerted && (
             <p className="mt-3 text-sm font-bold text-amber-300">
-              Temps écoulé ! Passez à l’exercice suivant ou ajoutez +1 min.
+              Temps écoulé ! Passez au bloc suivant ou ajoutez +1 min.
             </p>
           )}
         </div>
 
-        {/* High-Visibility Exercise Details */}
-        <div className="rounded-3xl border border-zinc-800 bg-zinc-950 p-5 sm:p-6">
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <h2 className="text-2xl font-extrabold leading-tight text-white sm:text-3xl">
-              {currentItem.exerciseName}
-            </h2>
-            {matchedBankExercise && (
-              <PicotBadge
-                compatibility={matchedBankExercise.picotCompatibility}
-              />
-            )}
+        {/* High-Visibility Exercise Card(s): Unified OR Dual Groupe A / Groupe B */}
+        {currentSlot.isDifferentiated ? (
+          <div className="grid grid-cols-1 gap-3.5">
+            {currentSlot.items.map((item) => {
+              const isA = item.groupeCible === 'Groupe A (Confirmés)';
+              const isB = item.groupeCible === 'Groupe B (Débutants)';
+              const tableNums = isA
+                ? groupATableNumbers
+                : isB
+                  ? groupBTableNumbers
+                  : [];
+              const header = isA
+                ? `Groupe A (Confirmés) — ${formatTableNumbers(tableNums)}`
+                : isB
+                  ? `Groupe B (Débutants) — ${formatTableNumbers(tableNums)}`
+                  : 'Tous les groupes';
+
+              return (
+                <LiveExerciseCard
+                  key={item.localId}
+                  item={item}
+                  bankExercise={findBankExercise(item)}
+                  groupHeader={header}
+                  accent={isA ? 'groupA' : isB ? 'groupB' : 'default'}
+                  compact
+                />
+              );
+            })}
           </div>
-
-          {matchedBankExercise?.technicalFocus && (
-            <p className="mt-2 inline-block rounded-lg bg-amber-500/15 px-3 py-1 text-sm font-semibold text-amber-300">
-              Focus : {matchedBankExercise.technicalFocus}
-            </p>
-          )}
-
-          {currentItem.objectives &&
-            currentItem.objectives !== matchedBankExercise?.description && (
-              <p className="mt-3 text-sm font-medium text-zinc-300">
-                Objectif séance : {currentItem.objectives}
-              </p>
-            )}
-
-          {/* Step-by-step instructions */}
-          {instructionLines.length > 0 && (
-            <ul className="mt-4 space-y-2.5">
-              {instructionLines.map((line, i) => (
-                <li
-                  key={i}
-                  className="flex items-start gap-3 rounded-xl bg-zinc-900/90 px-3.5 py-3 text-base leading-snug text-zinc-100"
-                >
-                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-xs font-bold text-amber-300">
-                    {i + 1}
-                  </span>
-                  <span>{line.replace(/^\d+[.)]\s*/, '')}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        ) : (
+          currentSlot.items[0] && (
+            <LiveExerciseCard
+              item={currentSlot.items[0]}
+              bankExercise={findBankExercise(currentSlot.items[0])}
+              accent="default"
+            />
+          )
+        )}
 
         {/* Contextual Picot Memo Card */}
         {exerciseBank.picotMemos.length > 0 && (
@@ -476,7 +626,7 @@ export function LiveModule() {
             <button
               type="button"
               disabled={safeIndex === 0}
-              onClick={() => switchToExercise(safeIndex - 1)}
+              onClick={() => switchToSlot(safeIndex - 1)}
               className="col-span-3 flex min-h-[60px] items-center justify-center gap-1 rounded-2xl border border-zinc-800 bg-zinc-900 text-sm font-bold text-white transition hover:bg-zinc-800 active:scale-95 disabled:opacity-35"
             >
               <ChevronLeft className="h-5 w-5" />
@@ -507,10 +657,10 @@ export function LiveModule() {
 
             <button
               type="button"
-              disabled={safeIndex >= preparation.length - 1}
+              disabled={safeIndex >= slots.length - 1}
               onClick={() => {
-                markLiveExerciseCompleted(currentItem.localId, true);
-                switchToExercise(safeIndex + 1);
+                markSlotCompleted(true);
+                switchToSlot(safeIndex + 1);
               }}
               className="col-span-3 flex min-h-[60px] items-center justify-center gap-1 rounded-2xl border border-zinc-800 bg-zinc-900 text-sm font-bold text-white transition hover:bg-zinc-800 active:scale-95 disabled:opacity-35"
             >
@@ -564,7 +714,8 @@ export function LiveModule() {
             ) : (
               <p className="mb-3 flex items-center gap-1.5 text-xs text-zinc-400">
                 <ArrowLeftRight className="h-3.5 w-3.5" />
-                Touchez 2 joueurs pour les permuter en direct.
+                Touchez 2 joueurs pour permuter, ou le badge A/B pour basculer
+                une table.
               </p>
             )}
 
@@ -574,10 +725,25 @@ export function LiveModule() {
                   key={table.tableNumber}
                   className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3"
                 >
-                  <div className="mb-2 flex items-center justify-between">
-                    <span className="text-xs font-bold uppercase text-amber-400">
-                      Table {table.tableNumber}
-                    </span>
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold uppercase text-white">
+                        Table {table.tableNumber}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => toggleTableGroup(table.tableNumber)}
+                        className={`rounded-md border px-2 py-0.5 text-[11px] font-bold ${
+                          table.groupLevel === 'Groupe A (Confirmés)'
+                            ? 'border-amber-500/40 bg-amber-500/20 text-amber-300'
+                            : 'border-sky-500/40 bg-sky-500/20 text-sky-300'
+                        }`}
+                      >
+                        {table.groupLevel === 'Groupe A (Confirmés)'
+                          ? 'Groupe A'
+                          : 'Groupe B'}
+                      </button>
+                    </div>
                     <span className="text-xs tabular-nums text-zinc-400">
                       Moy. {table.averagePoints} pts
                     </span>

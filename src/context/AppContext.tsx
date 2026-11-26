@@ -52,9 +52,12 @@ import {
   outboxQueue,
 } from '@/services/offlineQueue';
 import {
+  DEFAULT_LEVEL_THRESHOLD,
+  applyLevelThresholdToPairings,
   generatePairings,
   hasSpecialRubber,
   swapPlayersInPairings,
+  toggleTableGroupLevel,
 } from '@/services/pairings';
 
 export interface ToastMessage {
@@ -85,9 +88,12 @@ interface AppContextValue {
   setPairingMode: (mode: PairingMode) => void;
   oddMode: OddMode;
   setOddMode: (mode: OddMode) => void;
+  levelThreshold: number;
+  setLevelThreshold: (threshold: number) => void;
   pairings: PairingResult;
   regeneratePairings: () => void;
   swapPairingsPlayers: (playerIdA: string, playerIdB: string) => void;
+  toggleTableGroup: (tableNumber: number) => void;
 
   // Preparation & Live
   setPreparation: React.Dispatch<React.SetStateAction<PreparationItem[]>>;
@@ -132,6 +138,7 @@ const EMPTY_PAIRINGS: PairingResult = {
   basketPlayer: null,
   mode: 'HOMOGENE',
   oddMode: 'GROUPE_3',
+  levelThreshold: DEFAULT_LEVEL_THRESHOLD,
 };
 
 const LEGACY_DEMO_KEYS = [
@@ -162,6 +169,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [presentPlayerIds, setPresentPlayerIds] = useState<string[]>([]);
   const [pairingMode, setPairingMode] = useState<PairingMode>('HOMOGENE');
   const [oddMode, setOddMode] = useState<OddMode>('GROUPE_3');
+  const [levelThreshold, setLevelThresholdState] = useState<number>(
+    DEFAULT_LEVEL_THRESHOLD
+  );
   const [pairings, setPairings] = useState<PairingResult>(EMPTY_PAIRINGS);
 
   // Live & Closure tracking
@@ -536,13 +546,42 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const picotActive = presentSpecialPlayers.length > 0;
 
   // Keep pairings synchronized when present players / modes change
+  const levelThresholdRef = useRef(levelThreshold);
+  useEffect(() => {
+    levelThresholdRef.current = levelThreshold;
+  }, [levelThreshold]);
+
+  const setLevelThreshold = useCallback((threshold: number) => {
+    const safe = Math.max(500, Math.min(2500, Math.round(threshold)));
+    setLevelThresholdState(safe);
+    setPairings((prev) => applyLevelThresholdToPairings(prev, safe));
+  }, []);
+
+  const toggleTableGroup = useCallback((tableNumber: number) => {
+    setPairings((prev) => toggleTableGroupLevel(prev, tableNumber));
+  }, []);
+
   const regeneratePairings = useCallback(() => {
-    setPairings(generatePairings(presentPlayers, pairingMode, oddMode));
+    setPairings(
+      generatePairings(
+        presentPlayers,
+        pairingMode,
+        oddMode,
+        levelThresholdRef.current
+      )
+    );
   }, [presentPlayers, pairingMode, oddMode]);
 
   useEffect(() => {
     if (!hydrated) return;
-    setPairings(generatePairings(presentPlayers, pairingMode, oddMode));
+    setPairings(
+      generatePairings(
+        presentPlayers,
+        pairingMode,
+        oddMode,
+        levelThresholdRef.current
+      )
+    );
   }, [presentPlayers, pairingMode, oddMode, hydrated]);
 
   const togglePlayerPresence = useCallback((playerId: string) => {
@@ -886,6 +925,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         basketSuitability: input.basketSuitability,
         picotCompatibility: input.picotCompatibility,
         nbRealises: 0,
+        niveauCible: input.niveauCible ?? 'Tous niveaux',
       };
 
       setExerciseBank((prev) => ({
@@ -990,9 +1030,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     async (items: PreparationItem[]) => {
       if (blockIfReadOnly()) return;
 
+      // Preserve shared slot order (N°) for differentiated Groupe A / Groupe B variants
       const normalized = items.map((item, idx) => ({
         ...item,
-        order: idx + 1,
+        order: item.order > 0 ? item.order : idx + 1,
+        groupeCible: item.groupeCible ?? 'Tous',
       }));
       setPreparation(normalized);
 
@@ -1042,17 +1084,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
         const nextRowStart =
           prev.reduce((max, row) => Math.max(max, row.rowIndex), 6) + 1;
-        const added: SessionLogRow[] = completed.map((exo, idx) => ({
-          rowIndex: nextRowStart + idx,
-          date: payload.date,
-          order: idx + 1,
-          axis: exo.axis,
-          exerciseName: exo.exerciseName,
-          durationMin: exo.durationMin,
-          details: exo.details,
-          participants: payload.presentPlayerNames,
-          sessionId: payload.sessionId,
-        }));
+        const added: SessionLogRow[] = completed.map((exo, idx) => {
+          const groupTag =
+            exo.groupeCible && exo.groupeCible !== 'Tous'
+              ? `[${exo.groupeCible}]`
+              : '';
+          const trimmed = exo.details.trim();
+          const details =
+            groupTag && !trimmed.startsWith(groupTag)
+              ? trimmed
+                ? `${groupTag} ${trimmed}`
+                : groupTag
+              : trimmed;
+          return {
+            rowIndex: nextRowStart + idx,
+            date: payload.date,
+            order: exo.slotOrder ?? idx + 1,
+            axis: exo.axis,
+            exerciseName: exo.exerciseName,
+            durationMin: exo.durationMin,
+            details,
+            participants: payload.presentPlayerNames,
+            sessionId: payload.sessionId,
+          };
+        });
         return [...prev, ...added];
       });
 
@@ -1065,18 +1120,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         )
       );
 
-      const exoDelta = new Map<string, number>();
+      const distinctIds = new Set<string>();
       for (const exo of completed) {
         if (exo.exerciseId) {
-          exoDelta.set(exo.exerciseId, (exoDelta.get(exo.exerciseId) ?? 0) + 1);
+          distinctIds.add(exo.exerciseId);
         }
       }
       setExerciseBank((prev) => ({
         ...prev,
-        exercises: prev.exercises.map((e) => {
-          const delta = exoDelta.get(e.id);
-          return delta ? { ...e, nbRealises: e.nbRealises + delta } : e;
-        }),
+        exercises: prev.exercises.map((e) =>
+          distinctIds.has(e.id) ? { ...e, nbRealises: e.nbRealises + 1 } : e
+        ),
       }));
     },
     []
@@ -1214,9 +1268,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setPairingMode,
     oddMode,
     setOddMode,
+    levelThreshold,
+    setLevelThreshold,
     pairings,
     regeneratePairings,
     swapPairingsPlayers,
+    toggleTableGroup,
     setPreparation,
     activeSessionId,
     resetActiveSessionId,

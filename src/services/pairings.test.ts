@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_LEVEL_THRESHOLD,
+  applyLevelThresholdToPairings,
   generatePairings,
   hasSpecialRubber,
   swapPlayersInPairings,
+  toggleTableGroupLevel,
 } from './pairings';
 import type { Player, RubberType } from '@/types';
 
@@ -189,5 +192,35 @@ describe('pairings service', () => {
     expect(
       generatePairings(single, 'HOMOGENE', 'GROUPE_3').tables[0]?.players
     ).toHaveLength(1);
+  });
+
+  it('segments tables into Groupe A (Confirmés) and Groupe B (Débutants) using FFTT threshold and supports manual toggle', () => {
+    const players = [
+      makePlayer('J-001', 'Pro1', 1200),
+      makePlayer('J-002', 'Pro2', 1100),
+      makePlayer('J-003', 'Deb1', 620),
+      makePlayer('J-004', 'Deb2', 580),
+    ];
+
+    // Default threshold = 700 pts
+    expect(DEFAULT_LEVEL_THRESHOLD).toBe(700);
+    const result = generatePairings(players, 'HOMOGENE', 'GROUPE_3');
+
+    expect(result.levelThreshold).toBe(700);
+    expect(result.tables[0]?.averagePoints).toBe(1150);
+    expect(result.tables[0]?.groupLevel).toBe('Groupe A (Confirmés)');
+    expect(result.tables[1]?.averagePoints).toBe(600);
+    expect(result.tables[1]?.groupLevel).toBe('Groupe B (Débutants)');
+
+    // Raising threshold to 1200 reclassifies Table 1 (1150) into Groupe B
+    const raised = applyLevelThresholdToPairings(result, 1200);
+    expect(raised.tables[0]?.groupLevel).toBe('Groupe B (Débutants)');
+    expect(raised.tables[1]?.groupLevel).toBe('Groupe B (Débutants)');
+
+    // Manual 1-click toggle overrides Table 1 back to Groupe A
+    const toggled = toggleTableGroupLevel(raised, 1);
+    expect(toggled.tables[0]?.groupLevel).toBe('Groupe A (Confirmés)');
+    expect(toggled.tables[0]?.manualGroupOverride).toBe(true);
+    expect(toggled.tables[1]?.groupLevel).toBe('Groupe B (Débutants)');
   });
 });
